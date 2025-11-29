@@ -1,0 +1,48 @@
+version: '3.8'
+
+services:
+  # MongoDB Service
+  mongo:
+    image: mongo:latest
+    container_name: movie_manager_db
+    ports:
+      - "27018:27017"
+    volumes:
+      - mongo_data:/data/db
+    networks:
+      - movie_network
+
+  # Backend Service
+  backend:
+    build: ./backend
+    container_name: movie_manager_backend
+    ports:
+      - "5000:5000"
+    environment:
+      - MONGODB_URI=mongodb://mongo:27017/movie_manager
+      - PORT=5000
+    depends_on:
+      - mongo
+    networks:
+      - movie_network
+
+  # Frontend Service
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        - VITE_API_BASE_URL=http://localhost:5000
+    container_name: movie_manager_frontend
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
+    networks:
+      - movie_network
+
+volumes:
+  mongo_data:
+
+networks:
+  movie_network:
+    driver: bridge
