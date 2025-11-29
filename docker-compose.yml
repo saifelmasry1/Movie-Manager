@@ -21,6 +21,8 @@ services:
     environment:
       - MONGODB_URI=mongodb://mongo:27017/movie_manager
       - PORT=5000
+    command: sh -c "npm run seed && npm start"
+    restart: on-failure
     depends_on:
       - mongo
     networks:
