@@ -1,3 +1,9 @@
 // Configuration for API URL
-// Uses environment variable if available, otherwise defaults to localhost
-export const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "http://localhost:5000";
+// In dev: default http://localhost:5000
+// In prod: default /api (same host as frontend / ALB)
+const DEFAULT_API_BASE_URL = import.meta.env.DEV
+  ? "http://localhost:5000"
+  : "/api";
+
+export const API_BASE_URL =
+  import.meta.env.VITE_API_BASE_URL || DEFAULT_API_BASE_URL;
