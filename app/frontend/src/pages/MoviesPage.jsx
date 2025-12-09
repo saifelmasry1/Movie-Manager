@@ -11,7 +11,7 @@ const MoviesPage = () => {
     useEffect(() => {
         const fetchMovies = async () => {
             try {
-                const response = await axios.get(`${API_BASE_URL}/api/movies`);
+                const response = await axios.get(`${API_BASE_URL}/movies`);
                 setMovies(response.data);
                 setLoading(false);
             } catch (err) {

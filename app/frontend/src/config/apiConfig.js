@@ -1,8 +1,9 @@
+
 // Configuration for API URL
-// In dev: default http://localhost:5000
-// In prod: default /api (same host as frontend / ALB)
+// In dev: http://localhost:5000/api
+// In prod (EKS): /api  (ALB + Ingress هيكمّلوا الباقي)
 const DEFAULT_API_BASE_URL = import.meta.env.DEV
-  ? "http://localhost:5000"
+  ? "http://localhost:5000/api"
   : "/api";
 
 export const API_BASE_URL =

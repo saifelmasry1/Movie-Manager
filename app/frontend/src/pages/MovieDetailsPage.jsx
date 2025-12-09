@@ -13,7 +13,7 @@ const MovieDetailsPage = () => {
     useEffect(() => {
         const fetchMovie = async () => {
             try {
-                const response = await axios.get(`${API_BASE_URL}/api/movies/${id}`);
+                const response = await axios.get(`${API_BASE_URL}/movies/${id}`);
                 setMovie(response.data);
                 setLoading(false);
             } catch (err) {

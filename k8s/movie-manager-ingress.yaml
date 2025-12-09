@@ -1,0 +1,29 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: movie-manager-ingress
+  annotations:
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP":80}]'
+spec:
+  ingressClassName: alb
+  rules:
+    - http:
+        paths:
+          # Frontend on /
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: movie-manager-frontend
+                port:
+                  number: 80
+          # Backend API on /api
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: movie-manager-backend
+                port:
+                  number: 5000

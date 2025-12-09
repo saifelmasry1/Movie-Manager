@@ -1,0 +1,42 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: movie-manager-backend
+  labels:
+    app: movie-manager-backend
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: movie-manager-backend
+  template:
+    metadata:
+      labels:
+        app: movie-manager-backend
+    spec:
+      containers:
+        - name: backend
+          image: 163511166008.dkr.ecr.us-east-1.amazonaws.com/movie-manager-backend:eks-v1
+          ports:
+            - containerPort: 5000
+          env:
+            - name: MONGODB_URI
+              value: "mongodb://mongo:27017/movie_manager"
+            - name: PORT
+              value: "5000"
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: movie-manager-backend
+  labels:
+    app: movie-manager-backend
+spec:
+  selector:
+    app: movie-manager-backend
+  ports:
+    - name: http
+      port: 5000
+      targetPort: 5000
+  type: ClusterIP
