@@ -105,7 +105,7 @@ Adjust paths if your layout is slightly different.
 │   ├── movie-manager-backend.yaml
 │   ├── movie-manager-frontend.yaml
 │   └── movie-manager-ingress.yaml
-├── terraform/                   # VPC + EKS + node groups + IAM (Terraform)
+├── infra/eks/                   # VPC + EKS + node groups + IAM (Terraform)
 ├── scripts/
 │   ├── infra/addons/aws-lbc-cli.sh           # CLI-ish Bash installer for AWS LBC + IngressClass
 │   └── infra/addons/iam-policy.json          # AWS LBC IAM policy document
