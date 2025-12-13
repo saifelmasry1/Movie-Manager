@@ -25,3 +25,11 @@ logs/
 # Docker
 *.pid
 
+
+# Terraform
+**/.terraform/
+**/*.tfstate
+**/*.tfstate.*
+**/.terraform.tfstate.lock.info
+crash.log
+crash.*.log
