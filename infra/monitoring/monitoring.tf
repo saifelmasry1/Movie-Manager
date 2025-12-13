@@ -1,5 +1,7 @@
 resource "kubernetes_namespace_v1" "monitoring" {
-  metadata { name = var.namespace }
+  metadata {
+    name = var.namespace
+  }
 }
 
 locals {
@@ -8,9 +10,11 @@ locals {
 }
 
 resource "helm_release" "kps" {
-  name       = local.release_name
-  namespace  = kubernetes_namespace_v1.monitoring.metadata[0].name
-  repository = "https://prometheus-community.github.io/helm-charts"
+  name      = local.release_name
+  namespace = kubernetes_namespace_v1.monitoring.metadata[0].name
+
+  # OCI (بدل https://prometheus-community.github.io/helm-charts)
+  repository = "oci://ghcr.io/prometheus-community/charts"
   chart      = "kube-prometheus-stack"
   version    = var.kube_prometheus_stack_version
 
@@ -25,7 +29,10 @@ resource "helm_release" "kps" {
   timeout = 900
   atomic  = true
 
-  depends_on = [null_resource.single_default_sc]
+  depends_on = [
+    null_resource.single_default_sc,
+    aws_eks_addon.ebs_csi
+  ]
 }
 
 resource "null_resource" "wait_for_lbc" {
@@ -48,6 +55,7 @@ resource "kubernetes_ingress_v1" "grafana_alb" {
   metadata {
     name      = "grafana-alb"
     namespace = kubernetes_namespace_v1.monitoring.metadata[0].name
+
     annotations = {
       "alb.ingress.kubernetes.io/scheme"           = "internet-facing"
       "alb.ingress.kubernetes.io/target-type"      = "ip"
@@ -58,15 +66,19 @@ resource "kubernetes_ingress_v1" "grafana_alb" {
 
   spec {
     ingress_class_name = "alb"
+
     rule {
       http {
         path {
           path      = "/"
           path_type = "Prefix"
+
           backend {
             service {
               name = local.grafana_svc
-              port { number = 80 }
+              port {
+                number = 80
+              }
             }
           }
         }
@@ -74,5 +86,8 @@ resource "kubernetes_ingress_v1" "grafana_alb" {
     }
   }
 
-  depends_on = [helm_release.kps, null_resource.wait_for_lbc]
+  depends_on = [
+    helm_release.kps,
+    null_resource.wait_for_lbc
+  ]
 }
