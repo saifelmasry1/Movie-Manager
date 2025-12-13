@@ -1,0 +1,32 @@
+grafana:
+  service:
+    type: ClusterIP
+  persistence:
+    enabled: true
+    type: pvc
+    storageClassName: ${storage_class}
+    accessModes: [ "ReadWriteOnce" ]
+    size: ${grafana_size}
+
+prometheus:
+  prometheusSpec:
+    retention: 10d
+    storageSpec:
+      volumeClaimTemplate:
+        spec:
+          storageClassName: ${storage_class}
+          accessModes: [ "ReadWriteOnce" ]
+          resources:
+            requests:
+              storage: ${prometheus_size}
+
+alertmanager:
+  alertmanagerSpec:
+    storage:
+      volumeClaimTemplate:
+        spec:
+          storageClassName: ${storage_class}
+          accessModes: [ "ReadWriteOnce" ]
+          resources:
+            requests:
+              storage: 5Gi
