@@ -1,0 +1,36 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: mongo-seed-movies
+spec:
+  ttlSecondsAfterFinished: 3600
+  backoffLimit: 2
+  template:
+    metadata:
+      labels:
+        app: mongo-seed
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: seed
+          image: mongo:7
+          env:
+            - name: MONGO_URI
+              value: "mongodb://mongo:27017/movie_manager"
+          command:
+            - bash
+            - -lc
+            - |
+              echo "Seeding Mongo at: $MONGO_URI"
+              mongosh "$MONGO_URI" /seed/seed-movies.js
+              echo "Done."
+          volumeMounts:
+            - name: seed-script
+              mountPath: /seed
+      volumes:
+        - name: seed-script
+          configMap:
+            name: movie-manager-seed
+            items:
+              - key: seed-movies.js
+                path: seed-movies.js
