@@ -1,4 +1,3 @@
-# This file is part of the OpenSearch project
 provider "aws" {
   region = var.aws_region
 }
