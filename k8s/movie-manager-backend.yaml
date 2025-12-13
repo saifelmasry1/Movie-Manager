@@ -16,7 +16,7 @@ spec:
     spec:
       containers:
         - name: backend
-          image: 163511166008.dkr.ecr.us-east-1.amazonaws.com/movie-manager-backend:eks-v1
+          image: 163511166008.dkr.ecr.us-east-1.amazonaws.com/movie-manager-backend:latest
           ports:
             - containerPort: 5000
           env:
