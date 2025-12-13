@@ -344,95 +344,8 @@ kubectl logs deploy/movie-manager-frontend --tail=80
 
 ---
 
-## 7) MongoDB seeding (practical)
 
-Sometimes you want to wipe + re-seed the `movies` collection.
-
-### 7.1 Find Mongo pod
-
-Try the label first:
-
-```bash
-kubectl get pods -l app=mongo
-```
-
-If your manifest doesn’t use that label, just grab it by name:
-
-```bash
-kubectl get pods | grep -i mongo
-MPOD=$(kubectl get pods | awk '/^mongo-/{print $1; exit}')
-echo "$MPOD"
-```
-
-### 7.2 Identify which DB name the backend uses (recommended)
-
-Your backend deployment usually has `MONGO_URI` or similar env var:
-
-```bash
-kubectl get deploy movie-manager-backend -o yaml | grep -nE "MONGO|mongo"
-```
-
-Look for something like:
-- `mongodb://mongo:27017/movie_manager`
-- `mongodb://mongo:27017/moviemanager`
-
-That last part is the **database name**.
-
-### 7.3 Seed using mongosh (works on the official mongo image)
-
-Replace `movie_manager` with your DB name if different:
-
-```bash
-DB_NAME="movie_manager"
-
-kubectl exec -i "$MPOD" -- mongosh --quiet <<EOF
-use ${DB_NAME}
-
-db.movies.deleteMany({})
-
-db.movies.insertMany([
-  {
-    title: "The Shawshank Redemption",
-    year: 1994,
-    genre: "Drama",
-    rating: 9.3,
-    posterUrl: "/images/shawshank.jpg",
-    description: "Two imprisoned men bond over a number of years..."
-  },
-  {
-    title: "The Godfather",
-    year: 1972,
-    genre: "Crime",
-    rating: 9.2,
-    posterUrl: "/images/godfather.jpg",
-    description: "The aging patriarch of an organized crime dynasty..."
-  },
-  {
-    title: "Inception",
-    year: 2010,
-    genre: "Sci-Fi",
-    rating: 8.8,
-    posterUrl: "/images/inception.jpg",
-    description: "A thief who steals corporate secrets through dream-sharing..."
-  }
-])
-
-db.movies.countDocuments()
-EOF
-```
-
-**Good sign:** the last line prints `3`.
-
-### 7.4 Verify the API after seeding
-
-```bash
-ALB=$(kubectl get ingress movie-manager-ingress -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
-curl -s "http://$ALB/api/movies" | head -c 300; echo
-```
-
----
-
-## 8) Notes on `:latest` and `imagePullPolicy`
+## 7) Notes on `:latest` and `imagePullPolicy`
 
 For learning/labs, it’s convenient to use:
 
@@ -450,7 +363,7 @@ For real production, prefer **immutable tags** (like the timestamp tags above) t
 
 ---
 
-## 9) Troubleshooting checklist
+## 8) Troubleshooting checklist
 
 - **Ingress not getting an address**
   ```bash
@@ -479,7 +392,7 @@ For real production, prefer **immutable tags** (like the timestamp tags above) t
 
 ---
 
-## 10) Quick “everything is healthy” command set
+## 9) Quick “everything is healthy” command set
 
 ```bash
 kubectl get deploy,pods,svc,ingress
@@ -497,7 +410,7 @@ Database seeding is implemented in a **repeatable and declarative** way using a 
 
 ---
 
-### 1. MongoDB Persistent Storage (PVC)
+### 10.1. MongoDB Persistent Storage (PVC)
 
 MongoDB is deployed with the following constraints:
 
@@ -530,7 +443,7 @@ Expected:
 
 ---
 
-### 2. MongoDB Seeding (Kubernetes Job)
+### 10.2. MongoDB Seeding (Kubernetes Job)
 
 Instead of manual `kubectl exec` seeding, MongoDB is populated using:
 
@@ -570,7 +483,7 @@ Done.
 
 ---
 
-### 3. Verify MongoDB Data
+### 10.3. Verify MongoDB Data
 
 Run a temporary Mongo shell pod:
 
@@ -602,7 +515,7 @@ kubectl run mongo-check \
 
 ---
 
-### 4. Backend End-to-End Verification (Inside the Cluster)
+### 10.4. Backend End-to-End Verification (Inside the Cluster)
 
 Verify backend connectivity to MongoDB:
 
@@ -620,7 +533,7 @@ Expected:
 
 ---
 
-### 5. MongoDB Restart Safety Check
+### 10.5. MongoDB Restart Safety Check
 
 Restart MongoDB and verify data persistence:
 
@@ -650,7 +563,7 @@ Expected:
 
 ---
 
-### 6. Design Notes & Future Improvements
+### 10.6. Design Notes & Future Improvements
 
 - MongoDB runs as **single replica** to safely use one PVC
 - For high availability, migrate to:
