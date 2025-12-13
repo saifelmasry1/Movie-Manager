@@ -176,49 +176,6 @@ Login:
 - user: `admin`
 - password: (from the command above)
 
-
-### Recommended Grafana dashboards (important views + IDs)
-
-> **Note:** `kube-prometheus-stack` usually provisions a bunch of Kubernetes/Prometheus dashboards automatically.
-> In Grafana, go to **Dashboards → Browse** and you should already see folders like **Kubernetes** and **Prometheus**.
-
-If you **don’t** see the dashboards you want (or you want cleaner “one-glance” views), you can import community dashboards from Grafana.com:
-
-1) In Grafana: **Dashboards → New → Import**  
-2) Paste the **Dashboard ID** below → **Load**  
-3) Select your **Prometheus** data source → **Import**
-
-#### Core Kubernetes + Prometheus (recommended)
-
-- **Kubernetes cluster monitoring (via Prometheus)** — **ID: 315**  
-  Good “big picture”: nodes, pods, namespaces, resource usage trends.
-
-- **Node Exporter Full (node health & resources)** — **ID: 1860**  
-  CPU/RAM/disk/network on every node (classic, widely used).
-
-- **Kubernetes / Views / Global** — **ID: 15757**  
-  High-level workload + cluster signals in one place.
-
-- **Kubernetes / Views / Namespaces** — **ID: 15758**  
-  Quickly spot “which namespace is misbehaving”.
-
-- **Kubernetes / Views / Nodes** — **ID: 15759**  
-  Node pressure, saturation, and per-node workload signals.
-
-- **Kubernetes / Views / Pods** — **ID: 16511**  
-  Pod-level restarts, CPU/RAM, and health per workload/pod.
-
-- **Prometheus (server health/tsdb/scrapes)** — **ID: 19105**  
-  Scrape health, rule evaluation, TSDB stats, and query performance.
-
-#### Optional (AWS / Ingress angle)
-
-- **AWS Load Balancer Controller** — **ID: 18319**  
-  Useful *if* you are scraping the controller metrics into Prometheus (and you want a dashboard around it).
-
-> Tip: don’t overdo dashboards. The “must-watch” signals for this project are usually:
-> **Pod restarts**, **CPU/RAM pressure**, **HTTP 4xx/5xx**, and **Prometheus scrape errors**.
-
 ---
 
 ## 3) Deploy Movie Manager to the cluster (k8s)
@@ -387,31 +344,51 @@ kubectl logs deploy/movie-manager-frontend --tail=80
 
 ---
 
-## 7) MongoDB seeding (using a temporary `mongo-shell` helper pod)
+## 7) MongoDB seeding (practical)
 
-If you already have a full seed script (e.g. `seed-movies.js`) in your repo, the cleanest way to seed Mongo in-cluster is to run a temporary **Mongo shell pod**, copy the script into it, and execute it against the Mongo service.
+Sometimes you want to wipe + re-seed the `movies` collection.
 
-### 7.1 Create a temporary `mongo-shell` pod
+### 7.1 Find Mongo pod
 
-```bash
-kubectl run mongo-shell \
-  --image=mongo:latest \
-  --restart=Never \
-  --command -- sleep 3600
-```
-
-Wait until it’s running:
+Try the label first:
 
 ```bash
-kubectl get pod mongo-shell -w
+kubectl get pods -l app=mongo
 ```
 
-### 7.2 Put your seed script into a local file
+If your manifest doesn’t use that label, just grab it by name:
 
-Create `seed-movies.js` locally (example content):
+```bash
+kubectl get pods | grep -i mongo
+MPOD=$(kubectl get pods | awk '/^mongo-/{print $1; exit}')
+echo "$MPOD"
+```
 
-```javascript
-db.movies.deleteMany({}); // optional: wipe existing data
+### 7.2 Identify which DB name the backend uses (recommended)
+
+Your backend deployment usually has `MONGO_URI` or similar env var:
+
+```bash
+kubectl get deploy movie-manager-backend -o yaml | grep -nE "MONGO|mongo"
+```
+
+Look for something like:
+- `mongodb://mongo:27017/movie_manager`
+- `mongodb://mongo:27017/moviemanager`
+
+That last part is the **database name**.
+
+### 7.3 Seed using mongosh (works on the official mongo image)
+
+Replace `movie_manager` with your DB name if different:
+
+```bash
+DB_NAME="movie_manager"
+
+kubectl exec -i "$MPOD" -- mongosh --quiet <<EOF
+use ${DB_NAME}
+
+db.movies.deleteMany({})
 
 db.movies.insertMany([
   {
@@ -421,66 +398,39 @@ db.movies.insertMany([
     rating: 9.3,
     posterUrl: "/images/shawshank.jpg",
     description: "Two imprisoned men bond over a number of years..."
+  },
+  {
+    title: "The Godfather",
+    year: 1972,
+    genre: "Crime",
+    rating: 9.2,
+    posterUrl: "/images/godfather.jpg",
+    description: "The aging patriarch of an organized crime dynasty..."
+  },
+  {
+    title: "Inception",
+    year: 2010,
+    genre: "Sci-Fi",
+    rating: 8.8,
+    posterUrl: "/images/inception.jpg",
+    description: "A thief who steals corporate secrets through dream-sharing..."
   }
-  // ... keep the rest of your 12 movies here ...
-]);
+])
+
+db.movies.countDocuments()
+EOF
 ```
 
-### 7.3 Copy the script into the helper pod
+**Good sign:** the last line prints `3`.
+
+### 7.4 Verify the API after seeding
 
 ```bash
-kubectl cp seed-movies.js mongo-shell:/seed-movies.js
+ALB=$(kubectl get ingress movie-manager-ingress -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
+curl -s "http://$ALB/api/movies" | head -c 300; echo
 ```
 
-### 7.4 Execute the seed script (the important step)
-
-> Replace `movie_manager` if your DB name differs.
-
-```bash
-kubectl exec -it mongo-shell -- \
-  mongosh "mongodb://mongo:27017/movie_manager" /seed-movies.js
-```
-
-### 7.5 Verify the seeded data
-
-Count documents:
-
-```bash
-kubectl exec -it mongo-shell -- \
-  mongosh "mongodb://mongo:27017/movie_manager" --eval "db.movies.countDocuments()"
-```
-
-Fetch a sample document:
-
-```bash
-kubectl exec -it mongo-shell -- \
-  mongosh "mongodb://mongo:27017/movie_manager" --eval "db.movies.findOne()"
-```
-
-Expected: **12 documents** and one sample movie.
-
-### 7.6 Clean up
-
-Delete the helper pod:
-
-```bash
-kubectl delete pod mongo-shell
-```
-
-### 7.7 End-to-End check from inside the cluster (optional but awesome)
-
-Run a temporary curl pod to test the backend service DNS directly:
-
-```bash
-kubectl run curl-test \
-  --rm -it \
-  --image=curlimages/curl:8.8.0 \
-  --restart=Never -- \
-  curl http://movie-manager-backend.default.svc.cluster.local:5000/api/movies
-```
-
-Expected: a JSON array containing your seeded movies.
-
+---
 
 ## 8) Notes on `:latest` and `imagePullPolicy`
 
@@ -539,3 +489,177 @@ ALB=$(kubectl get ingress movie-manager-ingress -o jsonpath='{.status.loadBalanc
 curl -s -o /dev/null -w "frontend=%{http_code}\n" "http://$ALB/"
 curl -s -o /dev/null -w "api=%{http_code}\n" "http://$ALB/api/movies"
 ```
+
+## MongoDB Persistence & Seeding (Production-Ready)
+
+This project uses **MongoDB with persistent storage** backed by **AWS EBS (gp3 via the EBS CSI Driver)**.
+Database seeding is implemented in a **repeatable and declarative** way using a Kubernetes Job.
+
+---
+
+### 1. MongoDB Persistent Storage (PVC)
+
+MongoDB is deployed with the following constraints:
+
+- **Single replica**
+- **Recreate deployment strategy**
+- **PersistentVolumeClaim mounted at `/data/db`**
+
+This design guarantees:
+- Only one MongoDB process writes to the volume
+- Data survives pod restarts and rescheduling
+- Safe usage of a single EBS volume
+
+#### Apply MongoDB PVC and Deployment
+
+```bash
+kubectl apply -f k8s/mongo-pvc.yaml
+kubectl apply -f k8s/mongo.yaml
+```
+
+Verify storage and pod state:
+
+```bash
+kubectl get pvc,pv | grep mongo
+kubectl get pods -l app=mongo
+```
+
+Expected:
+- PVC status: `Bound`
+- Mongo pod: `Running`
+
+---
+
+### 2. MongoDB Seeding (Kubernetes Job)
+
+Instead of manual `kubectl exec` seeding, MongoDB is populated using:
+
+- **ConfigMap** → stores the seed JavaScript
+- **Job** → runs `mongosh`, inserts data, and exits
+
+This makes seeding **repeatable**, **auditable**, and **safe to rerun**.
+
+#### Seed Manifests
+
+- `k8s/mongo-seed-configmap.yaml`
+- `k8s/mongo-seed-job.yaml`
+
+#### Apply Seed Resources
+
+```bash
+kubectl apply -f k8s/mongo-seed-configmap.yaml
+kubectl apply -f k8s/mongo-seed-job.yaml
+```
+
+Check job status and logs:
+
+```bash
+kubectl get jobs
+kubectl logs job/mongo-seed-movies
+```
+
+Expected output:
+
+```
+Seeding Mongo at: mongodb://mongo:27017/movie_manager
+Done.
+```
+
+> The seed script starts with `db.movies.deleteMany({})`,
+> which makes the job **idempotent** and safe to re-run.
+
+---
+
+### 3. Verify MongoDB Data
+
+Run a temporary Mongo shell pod:
+
+```bash
+kubectl run mongo-check \
+  --rm -it \
+  --image=mongo:7 \
+  --restart=Never -- \
+  mongosh "mongodb://mongo:27017/movie_manager" \
+  --eval "db.movies.countDocuments()"
+```
+
+Expected output:
+
+```
+12
+```
+
+Verify a sample document:
+
+```bash
+kubectl run mongo-check \
+  --rm -it \
+  --image=mongo:7 \
+  --restart=Never -- \
+  mongosh "mongodb://mongo:27017/movie_manager" \
+  --eval "db.movies.findOne()"
+```
+
+---
+
+### 4. Backend End-to-End Verification (Inside the Cluster)
+
+Verify backend connectivity to MongoDB:
+
+```bash
+kubectl run curl-test \
+  --rm -it \
+  --image=curlimages/curl:8.8.0 \
+  --restart=Never -- \
+  curl http://movie-manager-backend.default.svc.cluster.local:5000/api/movies
+```
+
+Expected:
+- HTTP 200
+- JSON array with **12 movies**
+
+---
+
+### 5. MongoDB Restart Safety Check
+
+Restart MongoDB and verify data persistence:
+
+```bash
+kubectl rollout restart deploy/mongo
+kubectl rollout status deploy/mongo
+```
+
+Re-check data:
+
+```bash
+kubectl run mongo-check \
+  --rm -it \
+  --image=mongo:7 \
+  --restart=Never -- \
+  mongosh "mongodb://mongo:27017/movie_manager" \
+  --eval "db.movies.countDocuments()"
+```
+
+Expected:
+
+```
+12
+```
+
+✅ Confirms that PVC-backed storage is working correctly.
+
+---
+
+### 6. Design Notes & Future Improvements
+
+- MongoDB runs as **single replica** to safely use one PVC
+- For high availability, migrate to:
+  - MongoDB ReplicaSet
+  - StatefulSet
+  - One PVC per replica
+- The seed Job can be:
+  - Re-run manually
+  - Integrated into CI/CD
+  - Converted into a Helm hook
+
+---
