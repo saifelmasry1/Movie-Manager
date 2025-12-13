@@ -7,7 +7,7 @@ Movie Manager is a full-stack demo app (React + Node.js + MongoDB) deployed on *
 - **Amazon ECR** as image registry
 - **Kubernetes** manifests for MongoDB, backend, frontend & Ingress
 - **AWS Load Balancer Controller** + **ALB Ingress**
-- **Bash scripting** to automate ALB Controller installation (`aws-lbc-cli.sh`)
+- **Bash scripting** to automate ALB Controller installation (`infra/addons/aws-lbc-cli.sh`)
 
 The final result:  
 Browsing the ALB URL shows the Movie Manager UI with 12 seeded movies loaded from MongoDB running inside the cluster.
@@ -44,7 +44,7 @@ Browsing the ALB URL shows the Movie Manager UI with 12 seeded movies loaded fro
            |  pull images                                  |
            v                                               v
    +-----------------------------+             +-----------------------------+
-   | ☸️  EKS Cluster             |             | 📜 aws-lbc-cli.sh script    |
+   | ☸️  EKS Cluster             |             | 📜 infra/addons/aws-lbc-cli.sh script    |
    |  (depi-eks, us-east-1)      |             | - OIDC provider             |
    |                             |             | - IAM policy (iam-policy)   |
    |  +-----------------------+  |             | - IAM ServiceAccount        |
@@ -89,7 +89,7 @@ Browsing the ALB URL shows the Movie Manager UI with 12 seeded movies loaded fro
 - **Backend**: Node.js + Express + MongoDB driver
 - **Frontend**: React (Vite) + Axios
 - **Database**: MongoDB (running as a pod inside the cluster)
-- **Bash scripts**: `aws-lbc-cli.sh` for ALB Controller
+- **Bash scripts**: `infra/addons/aws-lbc-cli.sh` for ALB Controller
 
 ### 📂 Repository Layout (example)
 
@@ -107,8 +107,8 @@ Adjust paths if your layout is slightly different.
 │   └── movie-manager-ingress.yaml
 ├── terraform/                   # VPC + EKS + node groups + IAM (Terraform)
 ├── scripts/
-│   ├── aws-lbc-cli.sh           # CLI-ish Bash installer for AWS LBC + IngressClass
-│   └── iam-policy.json          # AWS LBC IAM policy document
+│   ├── infra/addons/aws-lbc-cli.sh           # CLI-ish Bash installer for AWS LBC + IngressClass
+│   └── infra/addons/iam-policy.json          # AWS LBC IAM policy document
 ├── seed-movies.js               # MongoDB seed script (12 movies)
 └── README.md
 ```
@@ -140,7 +140,7 @@ export CLUSTER_NAME=depi-eks
 From the Terraform folder:
 
 ```bash
-cd terraform
+cd infra/eks
 
 terraform init
 terraform plan
@@ -256,26 +256,26 @@ aws ecr describe-images \
 
 ## 3️⃣ Install AWS Load Balancer Controller via Bash Script
 
-We use the `aws-lbc-cli.sh` script to automate:
+We use the `infra/addons/aws-lbc-cli.sh` script to automate:
 - Associating IAM OIDC provider with EKS
-- Ensuring the IAM policy (`iam-policy.json`)
+- Ensuring the IAM policy (`infra/addons/iam-policy.json`)
 - Creating the IAM role + Kubernetes ServiceAccount
 - Installing / upgrading AWS Load Balancer Controller via Helm
 - Ensuring IngressClass named `alb`
 - (Optionally) deploying a sample Nginx Ingress
 
-From the folder where `aws-lbc-cli.sh` & `iam-policy.json` exist:
+From the folder where `infra/addons/aws-lbc-cli.sh` & `infra/addons/iam-policy.json` exist:
 
 ```bash
 cd scripts    # or wherever the script lives
 
-chmod +x aws-lbc-cli.sh
+chmod +x infra/addons/aws-lbc-cli.sh
 
 # With sample Nginx app (for quick testing)
-./aws-lbc-cli.sh --with-sample
+./infra/addons/aws-lbc-cli.sh --with-sample
 
 # Or without sample app
-./aws-lbc-cli.sh --no-sample
+./infra/addons/aws-lbc-cli.sh --no-sample
 ```
 
 The script:
@@ -475,7 +475,7 @@ kubectl delete -f k8s/mongo.yaml
 
 **Destroy infrastructure with Terraform:**
 ```bash
-cd terraform
+cd infra/eks
 terraform destroy
 ```
 

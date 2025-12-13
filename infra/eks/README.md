@@ -6,7 +6,7 @@ You will:
 
 1. Configure `kubectl` access to the EKS cluster.
 2. Install and configure the AWS Load Balancer Controller (ALB controller).
-3. Optionally deploy a sample NGINX application behind an Application Load Balancer using `aws-lbc-cli.sh`.
+3. Optionally deploy a sample NGINX application behind an Application Load Balancer using `../addons/aws-lbc-cli.sh`.
 
 ---
 
@@ -84,12 +84,12 @@ You should see pods such as:
 
 All (or most) should be in `Running` state.
 
-## 4. AWS Load Balancer Controller Installation (via aws-lbc-cli.sh)
+## 4. AWS Load Balancer Controller Installation (via ../addons/aws-lbc-cli.sh)
 
-The script `aws-lbc-cli.sh` automates the setup of the AWS Load Balancer Controller for EKS. It performs the following:
+The script `../addons/aws-lbc-cli.sh` automates the setup of the AWS Load Balancer Controller for EKS. It performs the following:
 
 - Associates an IAM OIDC provider with the EKS cluster (IRSA).
-- Ensures an IAM policy for the controller exists (using `iam-policy.json` or the official policy).
+- Ensures an IAM policy for the controller exists (using `../addons/iam-policy.json` or the official policy).
 - Creates or updates an IAM ServiceAccount in `kube-system`.
 - Installs or upgrades the AWS Load Balancer Controller Helm chart.
 - Ensures an IngressClass named `alb` exists.
@@ -100,7 +100,7 @@ The script `aws-lbc-cli.sh` automates the setup of the AWS Load Balancer Control
 From the repo root (or wherever the script is placed):
 
 ```bash
-chmod +x aws-lbc-cli.sh
+chmod +x ../addons/aws-lbc-cli.sh
 ```
 
 ### 4.2. Basic usage (with defaults)
@@ -114,13 +114,13 @@ If the script has default values like:
 you can simply run:
 
 ```bash
-./aws-lbc-cli.sh --with-sample
+./../addons/aws-lbc-cli.sh --with-sample
 ```
 
 or:
 
 ```bash
-./aws-lbc-cli.sh --no-sample
+./../addons/aws-lbc-cli.sh --no-sample
 ```
 
 ### 4.3. CLI arguments
@@ -140,7 +140,7 @@ The script supports several arguments:
 **Example 1 – Install controller + sample app**
 
 ```bash
-./aws-lbc-cli.sh \
+./../addons/aws-lbc-cli.sh \
   --cluster depi-eks \
   --region us-east-1 \
   --vpc-id vpc-0bd776ab3b50e7f53 \
@@ -150,7 +150,7 @@ The script supports several arguments:
 **Example 2 – Install controller only (no sample app)**
 
 ```bash
-./aws-lbc-cli.sh \
+./../addons/aws-lbc-cli.sh \
   --cluster depi-eks \
   --region us-east-1 \
   --vpc-id vpc-0bd776ab3b50e7f53 \
@@ -159,7 +159,7 @@ The script supports several arguments:
 
 ## 5. What the script does (high level)
 
-When you run `aws-lbc-cli.sh`, it performs:
+When you run `../addons/aws-lbc-cli.sh`, it performs:
 
 **OIDC Association**
 
@@ -173,7 +173,7 @@ eksctl utils associate-iam-oidc-provider \
 **IAM Policy**
 
 - Checks if an IAM policy named (e.g.) `AWSLoadBalancerControllerIAMPolicy` already exists.
-- If not, it creates it using `iam-policy.json` (either from the repo or downloaded from the official AWS Load Balancer Controller documentation).
+- If not, it creates it using `../addons/iam-policy.json` (either from the repo or downloaded from the official AWS Load Balancer Controller documentation).
 - If it exists, it reuses the existing policy ARN.
 
 **IAM ServiceAccount**
