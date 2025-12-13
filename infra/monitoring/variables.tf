@@ -30,5 +30,5 @@ variable "grafana_size" {
 
 variable "kube_prometheus_stack_version" {
   type    = string
-  default = "80.2.2"
+  default = "80.4.1"
 }
