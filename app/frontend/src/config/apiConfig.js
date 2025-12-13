@@ -1,10 +1,14 @@
+  // apiConfig.js
 
-// Configuration for API URL
-// In dev: http://localhost:5000/api
-// In prod (EKS): /api  (ALB + Ingress هيكمّلوا الباقي)
-const DEFAULT_API_BASE_URL = import.meta.env.DEV
-  ? "http://localhost:5000/api"
-  : "/api";
+  // 1. رابط التطوير المحلي
+  const DEV_API = "http://localhost:5000/api";
 
-export const API_BASE_URL =
-  import.meta.env.VITE_API_BASE_URL || DEFAULT_API_BASE_URL;
+  // 2. رابط الإنتاج (مسار نسبي ليتم توجيهه عبر Ingress)
+  const PROD_API = "/api";
+
+  /**
+   * import.meta.env.DEV:
+   * - تكون true عند تشغيل السيرفر محلياً (npm run dev)
+   * - تكون false عند بناء المشروع (npm run build)
+   */
+  export const API_BASE_URL = import.meta.env.DEV ? DEV_API : PROD_API;

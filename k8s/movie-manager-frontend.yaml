@@ -16,7 +16,8 @@ spec:
     spec:
       containers:
         - name: frontend
-          image: 163511166008.dkr.ecr.us-east-1.amazonaws.com/movie-manager-frontend:eks-v2
+          image: 163511166008.dkr.ecr.us-east-1.amazonaws.com/movie-manager-frontend:latest
+          imagePullPolicy: Always
           ports:
             - containerPort: 3000
 
