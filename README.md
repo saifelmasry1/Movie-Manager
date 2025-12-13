@@ -1,383 +1,397 @@
-# 🎬 Movie Manager on AWS EKS
+# Movie Manager on AWS EKS (Terraform + Kubernetes + Monitoring)
 
-Movie Manager is a full-stack demo app (React + Node.js + MongoDB) deployed on **Amazon EKS** using:
+This repo deploys a simple **Movie Manager** app (Frontend + Backend + MongoDB) on **AWS EKS**, fronted by an **AWS ALB Ingress** (via AWS Load Balancer Controller), and adds **Monitoring** (Prometheus + Grafana) via **kube-prometheus-stack**.
 
-- **Terraform** for infrastructure (VPC, subnets, EKS, node groups, IAM…)
-- **Docker** to containerize backend & frontend
-- **Amazon ECR** as image registry
-- **Kubernetes** manifests for MongoDB, backend, frontend & Ingress
-- **AWS Load Balancer Controller** + **ALB Ingress**
-- **Bash scripting** to automate ALB Controller installation (`infra/addons/aws-lbc-cli.sh`)
-
-The final result:  
-Browsing the ALB URL shows the Movie Manager UI with 12 seeded movies loaded from MongoDB running inside the cluster.
+The goal of this README is to be a **step-by-step runbook**: copy/paste commands, see what “good” looks like, and verify each layer is healthy.
 
 ---
 
-## 🏗 Architecture Overview
-
-### High-level diagram
+## High-level architecture (routing + networks)
 
 ```text
-                         +------------------------+
-                         | 💻 Developer Laptop    |
-                         | 🛠️ Terraform / Docker   |
-                         +-----------+------------+
-                                     |
-                   docker push 🐳    | terraform apply 🏗️
-                                     v
-                         +------------------------+
-                         | ☁️  AWS Account        |
-                         +------------------------+
-                                     |
-           +-------------------------+--------------------------+
-           |                                                    |
-           v                                                    v
-+---------------------+                           +------------------------+
-| 📦 Amazon ECR       |                           | 🌐 VPC, Subnets, IAM,  |
-| - movie-manager-    |<------ Terraform -------->| ☸️  EKS Cluster, Nodes |
-|   backend           |                           +-----------+------------+
-| - movie-manager-    |                                       |
-|   frontend          |                                       |
-+----------+----------+                                       |
-           |                                      Worker nodes pull images 📥
-           |  pull images                                  |
-           v                                               v
-   +-----------------------------+             +-----------------------------+
-   | ☸️  EKS Cluster             |             | 📜 infra/addons/aws-lbc-cli.sh script    |
-   |  (depi-eks, us-east-1)      |             | - OIDC provider             |
-   |                             |             | - IAM policy (iam-policy)   |
-   |  +-----------------------+  |             | - IAM ServiceAccount        |
-   |  | ⚖️ AWS Load Balancer  |  |             | - Helm install ALB Ctrlr    |
-   |  | Controller + Ingress  |  |             +-----------------------------+
-   |  +-----------+-----------+  |
-   |              |              |
-   |   +----------+------------+ |
-   |   | 🚦 Ingress (alb)      | |
-   |   | movie-manager-ingress | |
-   |   +----------+------------+ |
-   |              |              |
-   |   /                      /api
-   |   |                      |
-   |   v                      v
-   |+----------------+   +----------------------+
-   || 🕸️ SVC frontend|   | 🕸️ SVC backend     |
-   || (ClusterIP:80) |   | (ClusterIP:5000)     |
-   |+--------+-------+   +----------+-----------+
-   |         |                      |
-   |         v                      v
-   |  +-------------+        +------------------+       +-----------------+
-   |  | ⚛️ Frontend |        | 🔙 Backend       |       | 🍃 Mongo Service|
-   |  | Pods (React)|        | Pods (Node.js)   |       | (ClusterIP:27017)|
-   |  +-------------+        +--------+---------+       +--------+--------+
-   |                               |                           |
-   |                               v                           v
-   |                         +-----------+             +-----------------+
-   |                         | 🍃 MongoDB|             | 🍃 MongoDB Pod  |
-   |                         +-----------+             +-----------------+
-   +---------------------------------------------------------------+
+                         ┌──────────────────────────────────────────────────┐
+                         │                      AWS                         │
+                         │                                                  │
+Internet                 │   VPC                                             │
+  │                      │   ┌───────────────┐     ┌─────────────────────┐  │
+  │ HTTP :80             │   │ Public Subnets│     │ Private Subnets      │  │
+  ▼                      │   │ (ALB lives)   │     │ (EKS Nodes live)     │  │
+┌─────────────────┐     │   └───────┬───────┘     └─────────┬───────────┘  │
+│  ALB (Ingress)  │◄────┤           │                         │              │
+│ (AWS LBC)       │     │   Target Groups (IP mode)           │              │
+│ Listener :80    │─────┤──────────────┬──────────────────────┘              │
+└───────┬─────────┘     │              │                                     │
+        │               │              │                                     │
+        │ Path Rules    │              │                                     │
+        │               │              │                                     │
+        │  "/"          │              │                                     │
+        ▼               │              ▼                                     │
+  ┌───────────────┐     │      ┌─────────────────────────┐                   │
+  │ Frontend TG   │─────┼─────►│ Service: movie-manager- │                   │
+  │ (to Pods IPs) │     │      │ frontend (ClusterIP:80) │                   │
+  └───────────────┘     │      └─────────────┬───────────┘                   │
+                        │                    │                               │
+                        │                    ▼                               │
+                        │          ┌───────────────────┐                     │
+                        │          │ Frontend Pods     │                     │
+                        │          │ serve static UI   │                     │
+                        │          │ (container :3000) │                     │
+                        │          └───────────────────┘                     │
+                        │                                                    │
+                        │  "/api/*"  and "/images/*"                         │
+                        ▼                                                    │
+                  ┌───────────────┐                                          │
+                  │ Backend TG    │─────────────────────────────────────────┐ │
+                  │ (to Pods IPs) │                                         │ │
+                  └───────────────┘                                         │ │
+                                                                            ▼ ▼
+                                                                ┌─────────────────────────┐
+                                                                │ Service: movie-manager- │
+                                                                │ backend (ClusterIP:5000)│
+                                                                └─────────────┬───────────┘
+                                                                              │
+                                                                              ▼
+                                                                    ┌───────────────────┐
+                                                                    │ Backend Pods      │
+                                                                    │ Express API       │
+                                                                    │ :5000             │
+                                                                    └─────────┬─────────┘
+                                                                              │
+                                                                              │ (ClusterIP DNS)
+                                                                              ▼
+                                                                    ┌───────────────────┐
+                                                                    │ Service: mongo    │
+                                                                    │ (ClusterIP:27017) │
+                                                                    └─────────┬─────────┘
+                                                                              │
+                                                                              ▼
+                                                                    ┌───────────────────┐
+                                                                    │ Mongo Pod         │
+                                                                    │ :27017            │
+                                                                    └───────────────────┘
+
+
+Monitoring is a separate namespace + separate ALB:
+
+Internet → ALB (Ingress in monitoring ns) → Service grafana → Grafana Pods
 ```
 
-### 🔧 Tech Stack
+**Key routing idea:** the frontend uses **relative URLs** in production:
+- API: `/api/...`
+- Images: `/images/...`
 
-- **Cloud**: AWS (EKS, ECR, IAM, VPC, ALB)
-- **IaC**: Terraform
-- **Orchestration**: Kubernetes (EKS)
-- **Containers**: Docker
-- **Registry**: Amazon ECR
-- **Ingress**: AWS Load Balancer Controller + ALB Ingress
-- **Backend**: Node.js + Express + MongoDB driver
-- **Frontend**: React (Vite) + Axios
-- **Database**: MongoDB (running as a pod inside the cluster)
-- **Bash scripts**: `infra/addons/aws-lbc-cli.sh` for ALB Controller
+So the browser calls the same ALB hostname, and the Ingress routes to backend.
 
-### 📂 Repository Layout (example)
+---
 
-Adjust paths if your layout is slightly different.
+## Repo layout (important folders)
 
-```text
-.
-├── app
-│   ├── backend/                 # Node.js/Express API
-│   └── frontend/                # React/Vite SPA
-├── k8s
-│   ├── mongo.yaml               # MongoDB Deployment + Service
-│   ├── movie-manager-backend.yaml
-│   ├── movie-manager-frontend.yaml
-│   └── movie-manager-ingress.yaml
-├── infra/eks/                   # VPC + EKS + node groups + IAM (Terraform)
-├── scripts/
-│   ├── infra/addons/aws-lbc-cli.sh           # CLI-ish Bash installer for AWS LBC + IngressClass
-│   └── infra/addons/iam-policy.json          # AWS LBC IAM policy document
-├── seed-movies.js               # MongoDB seed script (12 movies)
-└── README.md
-```
+Typical layout you’ll use while following this README:
 
-## ✅ Prerequisites
+- `infra/eks/` — Terraform for EKS + core addons (example: EBS CSI, LBC prerequisites, IAM policy, …)
+- `infra/monitoring/` — Terraform that installs kube-prometheus-stack + Grafana ALB Ingress
+- `k8s/` — Kubernetes manifests: `mongo.yaml`, `movie-manager-backend.yaml`, `movie-manager-frontend.yaml`, `movie-manager-ingress.yaml` (names may vary)
+- `app/frontend/` — Vite/React frontend + Dockerfile
+- `app/backend/` — Backend + Dockerfile
 
-On your local machine:
+(If your repo differs slightly, adjust paths, but the workflow stays the same.)
 
-1. **AWS account** + IAM user with permission to EKS, ECR, IAM, EC2, CloudFormation, VPC.
-2. **Tools installed**:
-   - `terraform`
-   - `aws` (AWS CLI)
-   - `kubectl`
-   - `helm`
-   - `eksctl`
-   - `docker`
-   - `bash`
+---
 
-Export some handy environment variables (change as needed):
+## 0) Prerequisites
+
+Tools on your machine:
+
+- AWS CLI v2 authenticated (`aws sts get-caller-identity` should work)
+- Terraform
+- kubectl
+- Docker
+- (Optional) Helm
+
+AWS variables used in commands:
 
 ```bash
-export AWS_REGION=us-east-1
-export AWS_ACCOUNT_ID=163511166008
-export CLUSTER_NAME=depi-eks
+export ACCOUNT_ID="<YOUR_AWS_ACCOUNT_ID>"
+export AWS_REGION="us-east-1"
 ```
 
-## 1️⃣ Provision Infrastructure with Terraform
+---
 
-From the Terraform folder:
+## 1) Terraform: Provision EKS (infra/eks)
+
+> Run this from the repo root.
 
 ```bash
 cd infra/eks
-
 terraform init
-terraform plan
-terraform apply
+terraform fmt -recursive
+terraform validate
+terraform plan -out tfplan
+terraform apply tfplan
 ```
 
-Wait until Terraform finishes and the EKS cluster + node group is created.
+### Configure kubectl for the new cluster
 
-Update your local kubeconfig to talk to the new cluster:
+Replace `<CLUSTER_NAME>` with whatever your Terraform creates.
 
 ```bash
-aws eks update-kubeconfig \
-  --name $CLUSTER_NAME \
-  --region $AWS_REGION
+aws eks update-kubeconfig --region "$AWS_REGION" --name "<CLUSTER_NAME>"
+kubectl get nodes -o wide
 ```
 
-Verify the cluster:
+**Good sign:** you see nodes in `Ready`.
+
+---
+
+## 2) Terraform: Install Monitoring (infra/monitoring)
 
 ```bash
-kubectl get nodes
+cd ../../infra/monitoring
+terraform init
+terraform fmt -recursive
+terraform validate
+terraform plan -out tfplan
+terraform apply tfplan
 ```
 
-You should see the worker nodes ready, and the core kube-system pods running.
+### Get Grafana URL
 
-## 2️⃣ Build & Push Docker Images to ECR
-
-### 2.1 Create ECR repositories (first time only)
+If monitoring creates an Ingress called `grafana-alb`:
 
 ```bash
-aws ecr create-repository \
-  --repository-name movie-manager-backend \
-  --region $AWS_REGION
-
-aws ecr create-repository \
-  --repository-name movie-manager-frontend \
-  --region $AWS_REGION
+kubectl get ingress -n monitoring
+kubectl get ingress -n monitoring grafana-alb -o jsonpath='{.status.loadBalancer.ingress[0].hostname}{"\n"}'
 ```
-If they already exist, the error is fine.
 
-### 2.2 Login Docker to ECR
+### Get Grafana admin password (kube-prometheus-stack)
+
+Common secret name pattern (adjust if your release name differs):
 
 ```bash
-aws ecr get-login-password --region $AWS_REGION \
-  | docker login \
-      --username AWS \
-      --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com
+kubectl get secret -n monitoring | grep -i grafana
+kubectl get secret -n monitoring kube-prometheus-stack-grafana -o jsonpath='{.data.admin-password}' | base64 -d; echo
 ```
 
-### 2.3 Build backend image
+Login:
+- user: `admin`
+- password: (from the command above)
 
-```bash
-cd app/backend
 
-# Example tag
-BACKEND_TAG=eks-v1
+### Recommended Grafana dashboards (important views + IDs)
 
-docker build \
-  -t movie-manager-backend:$BACKEND_TAG \
-  .
-```
+> **Note:** `kube-prometheus-stack` usually provisions a bunch of Kubernetes/Prometheus dashboards automatically.
+> In Grafana, go to **Dashboards → Browse** and you should already see folders like **Kubernetes** and **Prometheus**.
 
-### 2.4 Build frontend image
+If you **don’t** see the dashboards you want (or you want cleaner “one-glance” views), you can import community dashboards from Grafana.com:
 
-The frontend needs to know where the backend API is.
-In production (EKS) we use the same host and call the backend via `/api`, so we build with:
+1) In Grafana: **Dashboards → New → Import**  
+2) Paste the **Dashboard ID** below → **Load**  
+3) Select your **Prometheus** data source → **Import**
 
-```bash
-cd ../frontend
+#### Core Kubernetes + Prometheus (recommended)
 
-FRONTEND_TAG=eks-v2
+- **Kubernetes cluster monitoring (via Prometheus)** — **ID: 315**  
+  Good “big picture”: nodes, pods, namespaces, resource usage trends.
 
-docker build \
-  -t movie-manager-frontend:$FRONTEND_TAG \
-  --build-arg VITE_API_BASE_URL=/api \
-  .
-```
+- **Node Exporter Full (node health & resources)** — **ID: 1860**  
+  CPU/RAM/disk/network on every node (classic, widely used).
 
-The frontend uses `API_BASE_URL` from `src/config/apiConfig.js`:
-- In dev: `http://localhost:5000`
-- In prod: `/api` (or overridden via `VITE_API_BASE_URL`)
+- **Kubernetes / Views / Global** — **ID: 15757**  
+  High-level workload + cluster signals in one place.
 
-### 2.5 Tag images with full ECR URIs
+- **Kubernetes / Views / Namespaces** — **ID: 15758**  
+  Quickly spot “which namespace is misbehaving”.
 
-```bash
-BACKEND_ECR_URI=$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/movie-manager-backend:$BACKEND_TAG
-FRONTEND_ECR_URI=$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/movie-manager-frontend:$FRONTEND_TAG
+- **Kubernetes / Views / Nodes** — **ID: 15759**  
+  Node pressure, saturation, and per-node workload signals.
 
-docker tag movie-manager-backend:$BACKEND_TAG   $BACKEND_ECR_URI
-docker tag movie-manager-frontend:$FRONTEND_TAG $FRONTEND_ECR_URI
-```
+- **Kubernetes / Views / Pods** — **ID: 16511**  
+  Pod-level restarts, CPU/RAM, and health per workload/pod.
 
-### 2.6 Push images to ECR
+- **Prometheus (server health/tsdb/scrapes)** — **ID: 19105**  
+  Scrape health, rule evaluation, TSDB stats, and query performance.
 
-```bash
-docker push $BACKEND_ECR_URI
-docker push $FRONTEND_ECR_URI
-```
+#### Optional (AWS / Ingress angle)
 
-Optionally verify:
-```bash
-aws ecr describe-images \
-  --repository-name movie-manager-backend \
-  --region $AWS_REGION \
-  --query 'imageDetails[].imageTags' \
-  --output table
+- **AWS Load Balancer Controller** — **ID: 18319**  
+  Useful *if* you are scraping the controller metrics into Prometheus (and you want a dashboard around it).
 
-aws ecr describe-images \
-  --repository-name movie-manager-frontend \
-  --region $AWS_REGION \
-  --query 'imageDetails[].imageTags' \
-  --output table
-```
+> Tip: don’t overdo dashboards. The “must-watch” signals for this project are usually:
+> **Pod restarts**, **CPU/RAM pressure**, **HTTP 4xx/5xx**, and **Prometheus scrape errors**.
 
-## 3️⃣ Install AWS Load Balancer Controller via Bash Script
+---
 
-We use the `infra/addons/aws-lbc-cli.sh` script to automate:
-- Associating IAM OIDC provider with EKS
-- Ensuring the IAM policy (`infra/addons/iam-policy.json`)
-- Creating the IAM role + Kubernetes ServiceAccount
-- Installing / upgrading AWS Load Balancer Controller via Helm
-- Ensuring IngressClass named `alb`
-- (Optionally) deploying a sample Nginx Ingress
+## 3) Deploy Movie Manager to the cluster (k8s)
 
-From the folder where `infra/addons/aws-lbc-cli.sh` & `infra/addons/iam-policy.json` exist:
+From repo root:
 
-```bash
-cd scripts    # or wherever the script lives
-
-chmod +x infra/addons/aws-lbc-cli.sh
-
-# With sample Nginx app (for quick testing)
-./infra/addons/aws-lbc-cli.sh --with-sample
-
-# Or without sample app
-./infra/addons/aws-lbc-cli.sh --no-sample
-```
-
-The script:
-- Auto-detects VPC ID using terraform output when possible
-- Uses the cluster name & region you pass via flags or defaults
-- Waits for the `aws-load-balancer-controller` deployment to be ready
-
-Useful checks:
-```bash
-kubectl get deploy aws-load-balancer-controller -n kube-system
-kubectl get pods -n kube-system | grep aws-load-balancer-controller
-kubectl get ingressclass
-```
-You should see an IngressClass called `alb`.
-
-## 4️⃣ Deploy the Application to EKS
-
-Assuming your Kubernetes manifests are in a `k8s/` directory.
-
-### 4.1 MongoDB Deployment & Service
-
-`k8s/mongo.yaml` (example):
-- Deployment `mongo`
-- Service `mongo` (ClusterIP, port 27017)
-
-Apply:
 ```bash
 kubectl apply -f k8s/mongo.yaml
-kubectl get pods
-kubectl get svc
-```
-
-### 4.2 Backend Deployment & Service
-
-`k8s/movie-manager-backend.yaml` should use the ECR image and expose port 5000.
-
-Apply:
-```bash
 kubectl apply -f k8s/movie-manager-backend.yaml
-kubectl get deploy movie-manager-backend
-kubectl get svc movie-manager-backend
-```
-
-### 4.3 Frontend Deployment & Service
-
-`k8s/movie-manager-frontend.yaml` should use the ECR image and expose port 3000 (targetPort).
-
-Apply:
-```bash
 kubectl apply -f k8s/movie-manager-frontend.yaml
-kubectl get deploy movie-manager-frontend
-kubectl get svc movie-manager-frontend
+kubectl apply -f k8s/movie-manager-ingress.yaml   # if you have it
 ```
 
-### 4.4 Ingress (ALB)
+Wait for rollouts:
 
-`k8s/movie-manager-ingress.yaml` (simplified):
-
-```yaml
-apiVersion: networking.k8s.io/v1
-kind: Ingress
-metadata:
-  name: movie-manager-ingress
-  annotations:
-    alb.ingress.kubernetes.io/scheme: internet-facing
-    alb.ingress.kubernetes.io/target-type: ip
-    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP":80}]'
-spec:
-  ingressClassName: alb
-  rules:
-    - http:
-        paths:
-          - path: /
-            pathType: Prefix
-            backend:
-              service:
-                name: movie-manager-frontend
-                port:
-                  number: 80
-          - path: /api
-            pathType: Prefix
-            backend:
-              service:
-                name: movie-manager-backend
-                port:
-                  number: 5000
-```
-
-Apply:
 ```bash
-kubectl apply -f k8s/movie-manager-ingress.yaml
-kubectl get ingress
-kubectl describe ingress movie-manager-ingress
+kubectl rollout status deploy/mongo --timeout=5m || true
+kubectl rollout status deploy/movie-manager-backend --timeout=5m
+kubectl rollout status deploy/movie-manager-frontend --timeout=5m
 ```
 
-After a few moments, the Ingress should show an ADDRESS field with the ALB DNS name.
+Check resources:
 
-## 5️⃣ Seed MongoDB with Movies
+```bash
+kubectl get deploy,pods,svc,ingress
+kubectl get events --sort-by=.lastTimestamp | tail -n 30
+```
 
-We seed the movies collection using `seed-movies.js` from inside the cluster.
+### Get the Movie Manager ALB DNS
 
-### 5.1 Run a temporary Mongo shell pod
+```bash
+ALB=$(kubectl get ingress movie-manager-ingress -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
+echo "$ALB"
+```
+
+---
+
+## 4) Build & Push Docker Images to ECR
+
+### 4.1 Login to ECR
+
+```bash
+aws ecr get-login-password --region "$AWS_REGION" \
+  | docker login --username AWS --password-stdin \
+  "$ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com"
+```
+
+> If the ECR repo doesn’t exist yet, create it:
+```bash
+aws ecr describe-repositories --repository-names movie-manager-backend --region "$AWS_REGION" >/dev/null 2>&1 \
+  || aws ecr create-repository --repository-name movie-manager-backend --region "$AWS_REGION"
+
+aws ecr describe-repositories --repository-names movie-manager-frontend --region "$AWS_REGION" >/dev/null 2>&1 \
+  || aws ecr create-repository --repository-name movie-manager-frontend --region "$AWS_REGION"
+```
+
+---
+
+## 5) Practical example: Backend Build & Push (ECR) + Deploy + Verify
+
+This section mirrors the “frontend style” flow: **Build → Push → Update → Verify**.
+
+### 5.1 Choose a tag
+
+Use immutable tags when you can (best practice):
+
+```bash
+TAG=eks-backend-$(date +%Y%m%d%H%M)
+echo "$TAG"
+```
+
+### 5.2 Build backend image
+
+Assuming your backend Dockerfile is at `app/backend/Dockerfile`:
+
+```bash
+docker build \
+  -t "$ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/movie-manager-backend:$TAG" \
+  -f app/backend/Dockerfile app/backend
+```
+
+**If your cluster nodes are x86_64 and you build on Apple Silicon**, add:
+```bash
+# docker build --platform linux/amd64 ...
+```
+
+### 5.3 Push backend image
+
+```bash
+docker push "$ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/movie-manager-backend:$TAG"
+```
+
+### 5.4 Update deployment on the cluster
+
+#### Option A (recommended): set the deployment image to the new immutable tag
+
+```bash
+kubectl set image deploy/movie-manager-backend \
+  backend="$ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/movie-manager-backend:$TAG"
+
+kubectl rollout status deploy/movie-manager-backend --timeout=5m
+```
+
+#### Option B (lab/demo): keep `:latest` + `imagePullPolicy: Always`
+
+If your manifest is using `:latest` and you push a new `:latest`, you must restart pods to force a pull:
+
+```bash
+kubectl rollout restart deploy/movie-manager-backend
+kubectl rollout status deploy/movie-manager-backend --timeout=5m
+```
+
+Check what the cluster is running:
+
+```bash
+kubectl get deploy movie-manager-backend -o jsonpath='{.spec.template.spec.containers[0].image}{" | "}{.spec.template.spec.containers[0].imagePullPolicy}{"\n"}'
+```
+
+---
+
+## 6) Verification (the most important part)
+
+### 6.1 Kubernetes health
+
+```bash
+kubectl get deploy,pods,svc,ingress
+kubectl get events --sort-by=.lastTimestamp | tail -n 20
+kubectl rollout status deploy/movie-manager-backend --timeout=2m
+kubectl rollout status deploy/movie-manager-frontend --timeout=2m
+```
+
+### 6.2 External routing (ALB + Ingress)
+
+```bash
+ALB=$(kubectl get ingress movie-manager-ingress -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
+
+# Frontend should be 200
+curl -s -o /dev/null -w "frontend=%{http_code}\n" "http://$ALB/"
+
+# Backend should be 200 and return JSON
+curl -s -o /dev/null -w "api=%{http_code}\n" "http://$ALB/api/movies"
+curl -s "http://$ALB/api/movies" | head -c 200; echo
+```
+
+### 6.3 Frontend build sanity (no localhost in production JS)
+
+Get the JS bundle path and search inside it:
+
+```bash
+JS=$(curl -s "http://$ALB/" | grep -oE 'src="[^"]+\.js"' | head -n 1 | cut -d'"' -f2)
+echo "JS=$JS"
+
+# Should NOT show localhost:5000
+curl -s --compressed "http://$ALB$JS" | grep -Eo 'localhost:5000|http://localhost:5000/api' | head || true
+
+# It IS okay to see "/api"
+curl -s --compressed "http://$ALB$JS" | grep -Eo '"/api"' | head
+```
+
+### 6.4 Check logs quickly (optional but useful)
+
+```bash
+kubectl logs deploy/movie-manager-backend --tail=80
+kubectl logs deploy/movie-manager-frontend --tail=80
+```
+
+---
+
+## 7) MongoDB seeding (using a temporary `mongo-shell` helper pod)
+
+If you already have a full seed script (e.g. `seed-movies.js`) in your repo, the cleanest way to seed Mongo in-cluster is to run a temporary **Mongo shell pod**, copy the script into it, and execute it against the Mongo service.
+
+### 7.1 Create a temporary `mongo-shell` pod
 
 ```bash
 kubectl run mongo-shell \
@@ -386,40 +400,77 @@ kubectl run mongo-shell \
   --command -- sleep 3600
 ```
 
-### 5.2 Copy the seed script
+Wait until it’s running:
+
+```bash
+kubectl get pod mongo-shell -w
+```
+
+### 7.2 Put your seed script into a local file
+
+Create `seed-movies.js` locally (example content):
+
+```javascript
+db.movies.deleteMany({}); // optional: wipe existing data
+
+db.movies.insertMany([
+  {
+    title: "The Shawshank Redemption",
+    year: 1994,
+    genre: "Drama",
+    rating: 9.3,
+    posterUrl: "/images/shawshank.jpg",
+    description: "Two imprisoned men bond over a number of years..."
+  }
+  // ... keep the rest of your 12 movies here ...
+]);
+```
+
+### 7.3 Copy the script into the helper pod
 
 ```bash
 kubectl cp seed-movies.js mongo-shell:/seed-movies.js
 ```
 
-### 5.3 Execute the seed script
+### 7.4 Execute the seed script (the important step)
+
+> Replace `movie_manager` if your DB name differs.
 
 ```bash
 kubectl exec -it mongo-shell -- \
   mongosh "mongodb://mongo:27017/movie_manager" /seed-movies.js
 ```
 
-### 5.4 Verify the data
+### 7.5 Verify the seeded data
+
+Count documents:
 
 ```bash
 kubectl exec -it mongo-shell -- \
   mongosh "mongodb://mongo:27017/movie_manager" --eval "db.movies.countDocuments()"
+```
 
+Fetch a sample document:
+
+```bash
 kubectl exec -it mongo-shell -- \
   mongosh "mongodb://mongo:27017/movie_manager" --eval "db.movies.findOne()"
 ```
 
-You should see 12 documents and a sample movie.
-Delete the helper pod when done:
+Expected: **12 documents** and one sample movie.
+
+### 7.6 Clean up
+
+Delete the helper pod:
+
 ```bash
 kubectl delete pod mongo-shell
 ```
 
-## 6️⃣ End-to-End Check
+### 7.7 End-to-End check from inside the cluster (optional but awesome)
 
-### 6.1 Check backend from inside the cluster
+Run a temporary curl pod to test the backend service DNS directly:
 
-Run a temporary curl pod:
 ```bash
 kubectl run curl-test \
   --rm -it \
@@ -427,213 +478,64 @@ kubectl run curl-test \
   --restart=Never -- \
   curl http://movie-manager-backend.default.svc.cluster.local:5000/api/movies
 ```
-You should see a JSON array with 12 movies.
 
-### 6.2 Access the app via ALB
+Expected: a JSON array containing your seeded movies.
 
-Get the Ingress address:
+
+## 8) Notes on `:latest` and `imagePullPolicy`
+
+For learning/labs, it’s convenient to use:
+
+- `image: ...:latest`
+- `imagePullPolicy: Always`
+
+Then after pushing a new `:latest`, do:
+
 ```bash
-kubectl get ingress movie-manager-ingress
+kubectl rollout restart deploy/movie-manager-frontend
+kubectl rollout restart deploy/movie-manager-backend
 ```
 
-Open the ADDRESS (e.g. `http://k8s-default-movieman-....elb.amazonaws.com`) in the browser. You should see:
-- Movie Manager UI
-- Posters loaded
-- Data fetched from `/api/movies`
-
-## 7️⃣ Useful Commands
-
-**Scale pods:**
-```bash
-kubectl scale deploy/movie-manager-backend --replicas=3
-kubectl scale deploy/movie-manager-frontend --replicas=3
-```
-
-**Update images:**
-```bash
-kubectl set image deploy/movie-manager-backend \
-  backend=$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/movie-manager-backend:new-tag
-
-kubectl set image deploy/movie-manager-frontend \
-  frontend=$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/movie-manager-frontend:new-tag
-
-kubectl rollout status deploy/movie-manager-backend
-kubectl rollout status deploy/movie-manager-frontend
-```
-
-## 8️⃣ Tear Down (Cleanup)
-
-To destroy everything:
-
-**Delete Kubernetes resources:**
-```bash
-kubectl delete -f k8s/movie-manager-ingress.yaml
-kubectl delete -f k8s/movie-manager-frontend.yaml
-kubectl delete -f k8s/movie-manager-backend.yaml
-kubectl delete -f k8s/mongo.yaml
-```
-
-**Destroy infrastructure with Terraform:**
-```bash
-cd infra/eks
-terraform destroy
-```
-
-## 9️⃣ Networking Deep Dive
-
-This section explains how networking works end-to-end:
-from the user's browser on the Internet → through AWS → into the EKS cluster → down to the MongoDB pod.
+For real production, prefer **immutable tags** (like the timestamp tags above) to avoid “it works on my cluster” mysteries.
 
 ---
 
-### 9.1 AWS Networking – VPC & Subnets
+## 9) Troubleshooting checklist
 
-Terraform provisions:
+- **Ingress not getting an address**
+  ```bash
+  kubectl describe ingress movie-manager-ingress
+  kubectl get pods -n kube-system | grep -i load-balancer
+  ```
 
-- A **VPC** (e.g. `10.0.0.0/16`)
-- **Public subnets** across multiple AZs  
-  → used by the **internet-facing ALB**
-- **Private subnets** across multiple AZs  
-  → used by the **EKS worker nodes**
-- An **Internet Gateway** and public route table  
-  → public subnets have a route `0.0.0.0/0` → Internet Gateway
-- A **NAT Gateway** and private route table  
-  → private subnets have a route `0.0.0.0/0` → NAT Gateway
+- **502/504 from ALB**
+  - Check service ports match container ports
+  - Check pods are Ready
+  ```bash
+  kubectl get endpoints movie-manager-backend
+  kubectl describe pod <backend-pod>
+  kubectl logs <backend-pod>
+  ```
 
-Implications:
+- **Frontend loads but API calls fail**
+  - Verify your bundle uses `/api`, not `localhost`
+  - Verify Ingress routes `/api/*` to backend
+  ```bash
+  kubectl get ingress movie-manager-ingress -o yaml | sed -n '1,200p'
+  ```
 
-- The **ALB** is reachable from the Internet (lives in **public** subnets).
-- The **EKS nodes & pods** live in **private** subnets and are *not* directly exposed.
-- Nodes can still pull container images from ECR and talk to external services via the NAT Gateway.
+- **Posters/images not loading**
+  - If poster URLs look like `/images/...`, ensure Ingress also routes `/images/*` to backend.
 
 ---
 
-### 9.2 Kubernetes Networking – Services & DNS
+## 10) Quick “everything is healthy” command set
 
-Inside the EKS cluster:
+```bash
+kubectl get deploy,pods,svc,ingress
+kubectl get events --sort-by=.lastTimestamp | tail -n 15
 
-- Each **pod** gets an IP address from the VPC CIDR (AWS VPC CNI).
-- We use **ClusterIP services** to expose pods internally:
-
-  - `Service mongo`  
-    - Type: `ClusterIP`  
-    - Port: `27017` → MongoDB pod
-  - `Service movie-manager-backend`  
-    - Type: `ClusterIP`  
-    - Port: `5000` → backend pods
-  - `Service movie-manager-frontend`  
-    - Type: `ClusterIP`  
-    - Port: `80` → frontend pods (targetPort `3000`)
-
-- **CoreDNS** provides internal DNS:
-  - `mongo.default.svc.cluster.local` → `mongo` Service ClusterIP
-  - `movie-manager-backend.default.svc.cluster.local` → backend Service
-  - `movie-manager-frontend.default.svc.cluster.local` → frontend Service
-
-The backend uses:
-
-```text
-MONGODB_URI = mongodb://mongo:27017/movie_manager
+ALB=$(kubectl get ingress movie-manager-ingress -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
+curl -s -o /dev/null -w "frontend=%{http_code}\n" "http://$ALB/"
+curl -s -o /dev/null -w "api=%{http_code}\n" "http://$ALB/api/movies"
 ```
-This relies entirely on Kubernetes DNS and does not hardcode any IPs.
-
-### 9.3 ECR and Image Pulls from Private Subnets
-
-Worker nodes live in private subnets and pull images from ECR via the NAT Gateway:
-
-Container images are referenced by full ECR URI, e.g.:
-
-```yaml
-image: 163511166008.dkr.ecr.us-east-1.amazonaws.com/movie-manager-backend:eks-v1
-```
-
-When the pod starts, the kubelet on the node:
-1. Makes an outbound connection to `*.dkr.ecr.us-east-1.amazonaws.com`
-2. Flows through the NAT Gateway to the public Internet
-3. Downloads the image and stores it locally on the node
-
-No inbound connectivity from the Internet to the nodes is required; everything is outbound-only.
-
-### 9.4 Ingress, AWS Load Balancer Controller & ALB
-
-We use an `Ingress` object of class `alb` plus AWS Load Balancer Controller:
-
-The `movie-manager-ingress` resource defines path-based routing:
-- `/` → Service `movie-manager-frontend` (port 80)
-- `/api` → Service `movie-manager-backend` (port 5000)
-
-AWS Load Balancer Controller watches this Ingress and:
-1. Creates an internet-facing ALB in the public subnets
-2. Creates target groups of type `ip` for:
-   - frontend pods
-   - backend pods
-3. Configures listeners & rules:
-   - HTTP 80 listener
-   - Rule `path=/` → frontend target group
-   - Rule `path=/api` → backend target group
-
-Traffic flow from the Internet:
-1. User opens `http://<ALB-DNS>/` in the browser.
-2. DNS resolves `<ALB-DNS>` to a public IP.
-3. Request hits the ALB (in public subnets).
-4. ALB forwards the request to the appropriate target group:
-   - `/` → frontend pods
-   - `/api` → backend pods
-5. The backend pod calls MongoDB through the internal `mongo` service.
-6. The MongoDB Service is ClusterIP only, so it is never exposed outside the cluster.
-
-### 9.5 Why Frontend Uses /api Instead of Hardcoding a Host
-
-The frontend uses a configuration like:
-
-```javascript
-// src/config/apiConfig.js
-const DEFAULT_API_BASE_URL = import.meta.env.DEV
-  ? "http://localhost:5000"
-  : "/api";
-
-export const API_BASE_URL =
-  import.meta.env.VITE_API_BASE_URL || DEFAULT_API_BASE_URL;
-```
-
-In development:
-- `API_BASE_URL` = `http://localhost:5000`
-- Frontend talks to backend on your local machine.
-
-In production (EKS):
-- `API_BASE_URL` = `/api`
-- Both frontend and backend are served behind the same ALB host.
-- The Ingress does the path-based routing.
-
-This keeps the networking simple:
-- Single ALB DNS name.
-- No CORS issues.
-- Clear separation:
-  - `/` → frontend
-  - `/api` → backend.
-
-### 9.6 Security Considerations (High-Level)
-
-- **Only the ALB security group** is open to the Internet (e.g. TCP/80 or TCP/443).
-- **Worker nodes**:
-  - Live in private subnets.
-  - Are reachable only from inside the VPC / via EKS control plane.
-- **MongoDB**:
-  - Exposed only via a ClusterIP Service.
-  - Access is limited to pods inside the cluster.
-- **ECR, S3, etc.**:
-  - Accessed via outbound traffic through the NAT Gateway.
-
-This design keeps:
-- Public surface area minimal (only ALB is Internet-facing).
-- App components isolated in private subnets with internal-only services.
-
-## 🔚 Summary
-
-- **Terraform**: builds the network, IAM, and EKS cluster.
-- **Docker + ECR**: package backend & frontend and store them in a managed registry.
-- **Bash scripting**: automates the AWS Load Balancer Controller setup.
-- **Kubernetes**: defines the application and exposes it via ALB.
-- **Mongo seeding**: fills the database.
-
-This README documents the full flow from `terraform apply` → EKS up → images built & pushed → app deployed → movies visible through the public ALB URL.
