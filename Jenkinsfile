@@ -8,9 +8,9 @@ pipeline {
   }
 
   parameters {
-    string(name: 'AWS_REGION',   defaultValue: 'us-east-1', description: 'AWS Region')
-    string(name: 'CLUSTER_NAME', defaultValue: 'depi-eks',  description: 'EKS Cluster Name')
-    string(name: 'K8S_NAMESPACE',defaultValue: 'default',   description: 'Namespace for app manifests')
+    string(name: 'AWS_REGION',    defaultValue: 'us-east-1', description: 'AWS Region')
+    string(name: 'CLUSTER_NAME',  defaultValue: 'depi-eks',  description: 'EKS Cluster Name')
+    string(name: 'K8S_NAMESPACE', defaultValue: 'default',   description: 'Namespace for app manifests')
   }
 
   environment {
@@ -147,6 +147,17 @@ pipeline {
           terraform import aws_iam_role.ebs_csi_irsa "${EBS_CSI_ROLE_NAME}" >/dev/null 2>&1 || true
           terraform import aws_iam_role_policy_attachment.ebs_csi "${EBS_CSI_ROLE_NAME}/${EBS_CSI_POLICY_ARN}" >/dev/null 2>&1 || true
 
+          # Import EBS CSI addon if it already exists in EKS (prevents 409 Addon already exists)
+          ADDON_NAME="aws-ebs-csi-driver"
+          if ! terraform state show aws_eks_addon.ebs_csi >/dev/null 2>&1; then
+            if aws eks describe-addon --cluster-name "$CLUSTER_NAME" --addon-name "$ADDON_NAME" --region "$AWS_REGION" >/dev/null 2>&1; then
+              terraform import aws_eks_addon.ebs_csi "${CLUSTER_NAME}:${ADDON_NAME}" >/dev/null 2>&1 || true
+            fi
+          fi
+
+          # (Optional but safe) Import storage class if it already exists
+          terraform import kubernetes_storage_class_v1.gp3 gp3 >/dev/null 2>&1 || true
+
           # If the role is tainted from a previous failure, untaint it so no delete/recreate happens
           terraform untaint aws_iam_role.ebs_csi_irsa >/dev/null 2>&1 || true
 
@@ -165,16 +176,20 @@ pipeline {
 
           kubectl apply -n "$K8S_NAMESPACE" -f k8s/
 
-          kubectl -n "$K8S_NAMESPACE" set image deployment/movie-manager-frontend *=${ECR_FRONTEND}:${GIT_SHA}
-          kubectl -n "$K8S_NAMESPACE" set image deployment/movie-manager-backend  *=${ECR_BACKEND}:${GIT_SHA}
+          # Update images safely (use explicit container names)
+          kubectl -n "$K8S_NAMESPACE" set image deployment/movie-manager-frontend movie-manager-frontend=${ECR_FRONTEND}:${GIT_SHA}
+          kubectl -n "$K8S_NAMESPACE" set image deployment/movie-manager-backend  movie-manager-backend=${ECR_BACKEND}:${GIT_SHA}
 
+          # Ensure mongo is ready before seeding
           kubectl -n "$K8S_NAMESPACE" rollout status deployment/mongo --timeout=10m
 
+          # Re-run seed job
           kubectl -n "$K8S_NAMESPACE" delete job mongo-seed-movies --ignore-not-found=true
           kubectl -n "$K8S_NAMESPACE" apply -f k8s/mongo-seed-configmap.yaml
           kubectl -n "$K8S_NAMESPACE" apply -f k8s/mongo-seed-job.yaml
           kubectl -n "$K8S_NAMESPACE" wait --for=condition=complete job/mongo-seed-movies --timeout=10m
 
+          # Wait for app rollouts
           kubectl -n "$K8S_NAMESPACE" rollout status deployment/movie-manager-frontend --timeout=6m
           kubectl -n "$K8S_NAMESPACE" rollout status deployment/movie-manager-backend  --timeout=6m
 
