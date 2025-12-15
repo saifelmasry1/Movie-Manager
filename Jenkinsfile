@@ -1,127 +1,79 @@
 pipeline {
   agent any
 
-  options {
-    timestamps()
-    disableConcurrentBuilds()
+  environment {
+    AWS_REGION    = "us-east-1"
+    CLUSTER_NAME  = "depi-eks"
+    ECR_REPO      = "movie-manager"
+    K8S_NAMESPACE = "default"
+    K8S_PATH      = "k8s"
+    DEPLOYMENT    = "movie-manager"   // لو عندك Deployment بنفس الاسم
   }
-
-  parameters {
-    string(name: 'AWS_REGION', defaultValue: 'us-east-1', description: 'AWS Region (e.g. us-east-1)')
-    string(name: 'EKS_CLUSTER_NAME', defaultValue: 'depi-eks', description: 'EKS cluster name')
-    string(name: 'ECR_REPOSITORY', defaultValue: 'movie-manager', description: 'ECR repo name (will be created if missing)')
-    string(name: 'DOCKER_CONTEXT', defaultValue: '.', description: 'Docker build context path')
-    string(name: 'DOCKERFILE', defaultValue: 'Dockerfile', description: 'Dockerfile path')
-    booleanParam(name: 'DEPLOY_TO_EKS', defaultValue: false, description: 'If true, deploy manifests to the cluster after pushing the image')
-    string(name: 'K8S_MANIFEST_PATH', defaultValue: 'k8s', description: 'Path to Kubernetes manifests (folder)')
-    string(name: 'K8S_NAMESPACE', defaultValue: 'default', description: 'Namespace to deploy to')
-    string(name: 'K8S_DEPLOYMENT', defaultValue: 'movie-manager', description: 'Deployment name to update (optional)')
-    string(name: 'K8S_CONTAINER', defaultValue: 'movie-manager', description: 'Container name in the deployment (optional)')
-  }
-
-environment {
-  AWS_REGION         = "${params.AWS_REGION}"
-  AWS_DEFAULT_REGION = "${params.AWS_REGION}"
-
-  EKS_CLUSTER_NAME   = "${params.EKS_CLUSTER_NAME}"
-  ECR_REPOSITORY     = "${params.ECR_REPOSITORY}"
-
-  BUILD_CONTEXT      = "${params.DOCKER_CONTEXT}"   // ✅ بدل DOCKER_CONTEXT
-  DOCKERFILE         = "${params.DOCKERFILE}"
-
-  K8S_MANIFEST_PATH  = "${params.K8S_MANIFEST_PATH}"
-  K8S_NAMESPACE      = "${params.K8S_NAMESPACE}"
-  K8S_DEPLOYMENT     = "${params.K8S_DEPLOYMENT}"
-  K8S_CONTAINER      = "${params.K8S_CONTAINER}"
-}
-
 
   stages {
-    stage('Prepare') {
+    stage('Checkout') {
       steps {
-        script {
-          env.AWS_ACCOUNT_ID = sh(
-            returnStdout: true,
-            script: "aws sts get-caller-identity --query Account --output text"
-          ).trim()
-
-          env.GIT_SHA = sh(returnStdout: true, script: "git rev-parse --short=12 HEAD").trim()
-          env.ECR_REGISTRY = "${env.AWS_ACCOUNT_ID}.dkr.ecr.${env.AWS_REGION}.amazonaws.com"
-          env.IMAGE_URI = "${env.ECR_REGISTRY}/${env.ECR_REPOSITORY}:${env.GIT_SHA}"
-
-          echo "AWS_ACCOUNT_ID = ${env.AWS_ACCOUNT_ID}"
-          echo "IMAGE_URI      = ${env.IMAGE_URI}"
-        }
+        git branch: 'main', url: 'https://github.com/saifelmasry1/Movie-Manager.git'
       }
     }
 
-    stage('ECR Login + Ensure Repo') {
+    stage('Prepare Vars') {
       steps {
-        sh '''#!/usr/bin/env bash
-          set -euo pipefail
-
-          aws ecr describe-repositories --repository-names "${ECR_REPOSITORY}" --region "${AWS_REGION}" >/dev/null 2>&1 \
-            || aws ecr create-repository --repository-name "${ECR_REPOSITORY}" --image-scanning-configuration scanOnPush=true --region "${AWS_REGION}" >/dev/null
-
-          aws ecr get-login-password --region "${AWS_REGION}" | docker login --username AWS --password-stdin "${ECR_REGISTRY}"
-        '''
+        script {
+          env.ACCOUNT_ID = sh(returnStdout: true, script: "aws sts get-caller-identity --query Account --output text").trim()
+          env.ECR_REGISTRY = "${env.ACCOUNT_ID}.dkr.ecr.${env.AWS_REGION}.amazonaws.com"
+          env.IMAGE = "${env.ECR_REGISTRY}/${env.ECR_REPO}:latest"
+          echo "IMAGE = ${env.IMAGE}"
+        }
       }
     }
 
     stage('Build Image') {
       steps {
-        sh '''#!/usr/bin/env bash
-          set -euo pipefail
-
-          if [ ! -f "${DOCKERFILE}" ]; then
-            echo "ERROR: Dockerfile not found at ${DOCKERFILE}"
-            exit 1
-          fi
-
-          docker build -f "${DOCKERFILE}" -t "${IMAGE_URI}" "${BUILD_CONTEXT}"
+        sh '''
+          set -e
+          docker build -t movie-manager:latest .
         '''
       }
     }
 
-    stage('Push Image') {
+    stage('ECR Login + Push') {
       steps {
-        sh '''#!/usr/bin/env bash
-          set -euo pipefail
-          docker push "${IMAGE_URI}"
+        sh '''
+          set -e
+          aws ecr get-login-password --region "$AWS_REGION" \
+            | docker login --username AWS --password-stdin "$ECR_REGISTRY"
+
+          # (اختياري) لو الريبو مش موجود يتعمل تلقائي
+          aws ecr describe-repositories --repository-names "$ECR_REPO" --region "$AWS_REGION" >/dev/null 2>&1 \
+            || aws ecr create-repository --repository-name "$ECR_REPO" --region "$AWS_REGION" >/dev/null
+
+          docker tag movie-manager:latest "$IMAGE"
+          docker push "$IMAGE"
         '''
       }
     }
 
-    stage('Deploy to EKS (manual toggle)') {
-      when { expression { return params.DEPLOY_TO_EKS } }
+    stage('Deploy to EKS') {
       steps {
-        sh '''#!/usr/bin/env bash
-          set -euo pipefail
+        sh '''
+          set -e
+          aws eks update-kubeconfig --name "$CLUSTER_NAME" --region "$AWS_REGION"
 
-          aws eks update-kubeconfig --region "${AWS_REGION}" --name "${EKS_CLUSTER_NAME}"
+          kubectl apply -f "$K8S_PATH" -n "$K8S_NAMESPACE"
 
-          if [ -d "${K8S_MANIFEST_PATH}" ]; then
-            if [ -f "${K8S_MANIFEST_PATH}/kustomization.yaml" ]; then
-              kubectl apply -k "${K8S_MANIFEST_PATH}"
-            else
-              kubectl apply -f "${K8S_MANIFEST_PATH}"
-            fi
-          else
-            echo "ERROR: K8S_MANIFEST_PATH not found: ${K8S_MANIFEST_PATH}"
-            exit 1
-          fi
-
-          kubectl -n "${K8S_NAMESPACE}" get deploy "${K8S_DEPLOYMENT}" >/dev/null 2>&1 && \
-            kubectl -n "${K8S_NAMESPACE}" set image "deployment/${K8S_DEPLOYMENT}" "${K8S_CONTAINER}=${IMAGE_URI}" --record || true
-
-          kubectl -n "${K8S_NAMESPACE}" rollout status "deployment/${K8S_DEPLOYMENT}" --timeout=3m || true
+          # Restart deployment لو موجود
+          kubectl rollout restart "deployment/$DEPLOYMENT" -n "$K8S_NAMESPACE" >/dev/null 2>&1 || true
+          kubectl rollout status "deployment/$DEPLOYMENT" -n "$K8S_NAMESPACE" --timeout=3m >/dev/null 2>&1 || true
         '''
       }
     }
   }
 
   post {
-    always {
+    success { echo "Done ✅" }
+    failure { echo "Failed ❌" }
+    always  {
       sh 'docker system prune -af >/dev/null 2>&1 || true'
     }
   }
