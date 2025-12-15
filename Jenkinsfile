@@ -4,52 +4,88 @@ pipeline {
   environment {
     AWS_REGION    = "us-east-1"
     CLUSTER_NAME  = "depi-eks"
-    ECR_REPO      = "movie-manager"
     K8S_NAMESPACE = "default"
-    K8S_PATH      = "k8s"
-    DEPLOYMENT    = "movie-manager"   // لو عندك Deployment بنفس الاسم
   }
 
   stages {
-    stage('Checkout') {
-      steps {
-        git branch: 'main', url: 'https://github.com/saifelmasry1/Movie-Manager.git'
-      }
-    }
 
     stage('Prepare Vars') {
       steps {
         script {
-          env.ACCOUNT_ID = sh(returnStdout: true, script: "aws sts get-caller-identity --query Account --output text").trim()
+          env.ACCOUNT_ID = sh(
+            returnStdout: true,
+            script: 'aws sts get-caller-identity --query Account --output text'
+          ).trim()
+
+          env.GIT_SHA = sh(
+            returnStdout: true,
+            script: 'git rev-parse --short=12 HEAD'
+          ).trim()
+
           env.ECR_REGISTRY = "${env.ACCOUNT_ID}.dkr.ecr.${env.AWS_REGION}.amazonaws.com"
-          env.IMAGE = "${env.ECR_REGISTRY}/${env.ECR_REPO}:latest"
-          echo "IMAGE = ${env.IMAGE}"
+          env.ECR_FRONTEND = "${env.ECR_REGISTRY}/movie-manager-frontend"
+          env.ECR_BACKEND  = "${env.ECR_REGISTRY}/movie-manager-backend"
+
+          echo "ACCOUNT_ID   = ${env.ACCOUNT_ID}"
+          echo "GIT_SHA      = ${env.GIT_SHA}"
+          echo "ECR_FRONTEND = ${env.ECR_FRONTEND}"
+          echo "ECR_BACKEND  = ${env.ECR_BACKEND}"
         }
       }
     }
 
-    stage('Build Image') {
+    stage('Build Docker Images') {
       steps {
         sh '''
           set -e
-          docker build -t movie-manager:latest .
+          # مهم: امنع أي تضارب مع Docker contexts
+          unset DOCKER_CONTEXT || true
+
+          echo "Building Frontend..."
+          docker build -t movie-manager-frontend:${GIT_SHA} -f app/frontend/Dockerfile app/frontend
+
+          echo "Building Backend..."
+          docker build -t movie-manager-backend:${GIT_SHA} -f app/backend/Dockerfile app/backend
         '''
       }
     }
 
-    stage('ECR Login + Push') {
+    stage('AWS ECR Login + Ensure Repos') {
       steps {
         sh '''
           set -e
+          unset DOCKER_CONTEXT || true
+
+          aws ecr describe-repositories --region "$AWS_REGION" --repository-names "movie-manager-frontend" >/dev/null 2>&1 \
+            || aws ecr create-repository --region "$AWS_REGION" --repository-name "movie-manager-frontend" >/dev/null
+
+          aws ecr describe-repositories --region "$AWS_REGION" --repository-names "movie-manager-backend" >/dev/null 2>&1 \
+            || aws ecr create-repository --region "$AWS_REGION" --repository-name "movie-manager-backend" >/dev/null
+
           aws ecr get-login-password --region "$AWS_REGION" \
             | docker login --username AWS --password-stdin "$ECR_REGISTRY"
+        '''
+      }
+    }
 
-          # (اختياري) لو الريبو مش موجود يتعمل تلقائي
-          aws ecr describe-repositories --repository-names "$ECR_REPO" --region "$AWS_REGION" >/dev/null 2>&1 \
-            || aws ecr create-repository --repository-name "$ECR_REPO" --region "$AWS_REGION" >/dev/null
+    stage('Tag & Push Images') {
+      steps {
+        sh '''
+          set -e
+          unset DOCKER_CONTEXT || true
 
-          docker tag movie-manager:latest "$IMAGE"
-          docker push "$IMAGE"
+          docker tag movie-manager-frontend:${GIT_SHA} ${ECR_FRONTEND}:${GIT_SHA}
+          docker tag movie-manager-backend:${GIT_SHA}  ${ECR_BACKEND}:${GIT_SHA}
+
+          docker push ${ECR_FRONTEND}:${GIT_SHA}
+          docker push ${ECR_BACKEND}:${GIT_SHA}
+
+          # اختياري: latest كمان
+          docker tag movie-manager-frontend:${GIT_SHA} ${ECR_FRONTEND}:latest
+          docker tag movie-manager-backend:${GIT_SHA}  ${ECR_BACKEND}:latest
+
+          docker push ${ECR_FRONTEND}:latest
+          docker push ${ECR_BACKEND}:latest
         '''
       }
     }
@@ -58,23 +94,32 @@ pipeline {
       steps {
         sh '''
           set -e
+
           aws eks update-kubeconfig --name "$CLUSTER_NAME" --region "$AWS_REGION"
 
-          kubectl apply -f "$K8S_PATH" -n "$K8S_NAMESPACE"
+          # Apply manifests
+          kubectl apply -n "$K8S_NAMESPACE" -f k8s/
 
-          # Restart deployment لو موجود
-          kubectl rollout restart "deployment/$DEPLOYMENT" -n "$K8S_NAMESPACE" >/dev/null 2>&1 || true
-          kubectl rollout status "deployment/$DEPLOYMENT" -n "$K8S_NAMESPACE" --timeout=3m >/dev/null 2>&1 || true
+          # حدث الصور على الديبلويمنتس (بدون ما نهتم باسم الـ container)
+          kubectl -n "$K8S_NAMESPACE" set image deployment/movie-manager-frontend *=${ECR_FRONTEND}:${GIT_SHA}
+          kubectl -n "$K8S_NAMESPACE" set image deployment/movie-manager-backend  *=${ECR_BACKEND}:${GIT_SHA}
+
+          kubectl -n "$K8S_NAMESPACE" rollout status deployment/movie-manager-frontend --timeout=3m
+          kubectl -n "$K8S_NAMESPACE" rollout status deployment/movie-manager-backend  --timeout=3m
         '''
       }
     }
   }
 
   post {
-    success { echo "Done ✅" }
-    failure { echo "Failed ❌" }
-    always  {
+    always {
       sh 'docker system prune -af >/dev/null 2>&1 || true'
+    }
+    success {
+      echo "Deployment Completed Successfully ✔"
+    }
+    failure {
+      echo "Deployment Failed ❌"
     }
   }
 }

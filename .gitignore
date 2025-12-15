@@ -45,3 +45,8 @@ azza.pem
 azza.pub
 *.pem
 *.pub
+
+# keys
+*.pem
+*.pub
+
