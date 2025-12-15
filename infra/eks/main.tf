@@ -147,6 +147,11 @@ resource "aws_eks_cluster" "eks" {
   name     = var.cluster_name
   role_arn = aws_iam_role.eks_cluster_role.arn
 
+  access_config {
+    authentication_mode                         = "API_AND_CONFIG_MAP"
+    bootstrap_cluster_creator_admin_permissions = true
+  }
+
   vpc_config {
     subnet_ids = concat(
       aws_subnet.public[*].id,
@@ -162,6 +167,7 @@ resource "aws_eks_cluster" "eks" {
 }
 
 ####################################################
+
 # EKS Node Group (Private Subnets)
 ####################################################
 resource "aws_eks_node_group" "eks_nodes" {

@@ -192,3 +192,13 @@ output "jenkins_url" {
 output "jenkins_ssh_hint" {
   value = "ssh -o IdentitiesOnly=yes -i ${var.jenkins_private_key_path} ubuntu@${aws_instance.jenkins.public_ip}"
 }
+
+resource "aws_security_group_rule" "jenkins_to_eks_api" {
+  type                     = "ingress"
+  from_port                = 443
+  to_port                  = 443
+  protocol                 = "tcp"
+  security_group_id        = aws_eks_cluster.eks.vpc_config[0].cluster_security_group_id
+  source_security_group_id = aws_security_group.jenkins_sg.id
+  description              = "Allow Jenkins EC2 to reach EKS API server"
+}

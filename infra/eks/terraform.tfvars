@@ -1,14 +1,11 @@
-aws_region           = "us-east-1"
-cluster_name         = "depi-eks"
-vpc_cidr             = "10.0.0.0/16"
-public_subnet_cidrs  = ["10.0.1.0/24", "10.0.2.0/24"]
-private_subnet_cidrs = ["10.0.101.0/24", "10.0.102.0/24"]
-node_instance_type   = "t3.medium"
-desired_capacity     = 2
-min_size             = 1
-max_size             = 3
+aws_region               = "us-east-1"
+cluster_name             = "depi-eks"
+vpc_cidr                 = "10.0.0.0/16"
+public_subnet_cidrs      = ["10.0.1.0/24", "10.0.2.0/24"]
+private_subnet_cidrs     = ["10.0.101.0/24", "10.0.102.0/24"]
+node_instance_type       = "t3.medium"
+desired_capacity         = 2
+min_size                 = 1
+max_size                 = 3
 jenkins_key_name         = "azza"
 jenkins_private_key_path = "~/.ssh/azza.pem"
-
-
-
