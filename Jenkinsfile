@@ -6,9 +6,6 @@ pipeline {
     disableConcurrentBuilds()
   }
 
-  // No triggers here on purpose.
-  // You will click "Build Now" manually from the Jenkins UI.
-
   parameters {
     string(name: 'AWS_REGION', defaultValue: 'us-east-1', description: 'AWS Region (e.g. us-east-1)')
     string(name: 'EKS_CLUSTER_NAME', defaultValue: 'depi-eks', description: 'EKS cluster name')
@@ -23,7 +20,18 @@ pipeline {
   }
 
   environment {
+    AWS_REGION        = "${params.AWS_REGION}"
     AWS_DEFAULT_REGION = "${params.AWS_REGION}"
+
+    EKS_CLUSTER_NAME  = "${params.EKS_CLUSTER_NAME}"
+    ECR_REPOSITORY    = "${params.ECR_REPOSITORY}"
+    DOCKER_CONTEXT    = "${params.DOCKER_CONTEXT}"
+    DOCKERFILE        = "${params.DOCKERFILE}"
+
+    K8S_MANIFEST_PATH = "${params.K8S_MANIFEST_PATH}"
+    K8S_NAMESPACE     = "${params.K8S_NAMESPACE}"
+    K8S_DEPLOYMENT    = "${params.K8S_DEPLOYMENT}"
+    K8S_CONTAINER     = "${params.K8S_CONTAINER}"
   }
 
   stages {
@@ -36,8 +44,8 @@ pipeline {
           ).trim()
 
           env.GIT_SHA = sh(returnStdout: true, script: "git rev-parse --short=12 HEAD").trim()
-          env.ECR_REGISTRY = "${env.AWS_ACCOUNT_ID}.dkr.ecr.${params.AWS_REGION}.amazonaws.com"
-          env.IMAGE_URI = "${env.ECR_REGISTRY}/${params.ECR_REPOSITORY}:${env.GIT_SHA}"
+          env.ECR_REGISTRY = "${env.AWS_ACCOUNT_ID}.dkr.ecr.${env.AWS_REGION}.amazonaws.com"
+          env.IMAGE_URI = "${env.ECR_REGISTRY}/${env.ECR_REPOSITORY}:${env.GIT_SHA}"
 
           echo "AWS_ACCOUNT_ID = ${env.AWS_ACCOUNT_ID}"
           echo "IMAGE_URI      = ${env.IMAGE_URI}"
@@ -65,7 +73,6 @@ pipeline {
 
           if [ ! -f "${DOCKERFILE}" ]; then
             echo "ERROR: Dockerfile not found at ${DOCKERFILE}"
-            echo "Fix DOCKERFILE parameter (or add Dockerfile to repo)."
             exit 1
           fi
 
