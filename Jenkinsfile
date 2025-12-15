@@ -1,10 +1,26 @@
 pipeline {
   agent any
 
+  options {
+    timestamps()
+    ansiColor('xterm')
+    disableConcurrentBuilds()
+    buildDiscarder(logRotator(numToKeepStr: '15'))
+  }
+
+  parameters {
+    string(name: 'AWS_REGION',   defaultValue: 'us-east-1', description: 'AWS Region')
+    string(name: 'CLUSTER_NAME', defaultValue: 'depi-eks',  description: 'EKS Cluster Name')
+    string(name: 'K8S_NAMESPACE',defaultValue: 'default',   description: 'Namespace for app manifests')
+  }
+
   environment {
-    AWS_REGION    = "us-east-1"
-    CLUSTER_NAME  = "depi-eks"
-    K8S_NAMESPACE = "default"
+    AWS_REGION    = "${params.AWS_REGION}"
+    CLUSTER_NAME  = "${params.CLUSTER_NAME}"
+    K8S_NAMESPACE = "${params.K8S_NAMESPACE}"
+
+    TF_IN_AUTOMATION = "true"
+    TF_INPUT         = "0"
   }
 
   stages {
@@ -19,10 +35,15 @@ pipeline {
           env.ECR_FRONTEND = "${env.ECR_REGISTRY}/movie-manager-frontend"
           env.ECR_BACKEND  = "${env.ECR_REGISTRY}/movie-manager-backend"
 
+          // Used for Terraform imports
+          env.EBS_CSI_ROLE_NAME = "${env.CLUSTER_NAME}-ebs-csi-irsa"
+          env.EBS_CSI_POLICY_ARN = "arn:aws:iam::aws:policy/service-role/AmazonEBSCSIDriverPolicy"
+
           echo "ACCOUNT_ID   = ${env.ACCOUNT_ID}"
           echo "GIT_SHA      = ${env.GIT_SHA}"
           echo "ECR_FRONTEND = ${env.ECR_FRONTEND}"
           echo "ECR_BACKEND  = ${env.ECR_BACKEND}"
+          echo "EBS_CSI_ROLE = ${env.EBS_CSI_ROLE_NAME}"
         }
       }
     }
@@ -37,7 +58,7 @@ pipeline {
           docker build -t movie-manager-frontend:${GIT_SHA} -f app/frontend/Dockerfile app/frontend
 
           echo "Building Backend..."
-          docker build -t movie-manager-backend:${GIT_SHA}  -f app/backend/Dockerfile  app/backend
+          docker build -t movie-manager-backend:${GIT_SHA} -f app/backend/Dockerfile app/backend
         '''
       }
     }
@@ -95,7 +116,6 @@ pipeline {
       steps {
         sh '''
           set -e
-
           chmod +x infra/addons/aws-lbc-cli.sh
 
           VPC_ID="$(aws eks describe-cluster --name "$CLUSTER_NAME" --region "$AWS_REGION" \
@@ -117,13 +137,30 @@ pipeline {
       steps {
         sh '''
           set -e
-
           cd infra/monitoring
+
           terraform fmt -recursive
           terraform init -upgrade
+
+          # ---- CI Idempotency Guardrails ----
+          # Import existing k8s namespace (prevents "namespace already exists")
+          terraform import kubernetes_namespace_v1.monitoring monitoring >/dev/null 2>&1 || true
+
+          # Import existing IAM role/attachment if they already exist (safe on first run)
+          terraform import aws_iam_role.ebs_csi_irsa "${EBS_CSI_ROLE_NAME}" >/dev/null 2>&1 || true
+          terraform import aws_iam_role_policy_attachment.ebs_csi "${EBS_CSI_ROLE_NAME}/${EBS_CSI_POLICY_ARN}" >/dev/null 2>&1 || true
+
+          # If a previous failed run tainted the role, untaint so Terraform won't try delete/recreate it
+          terraform untaint aws_iam_role.ebs_csi_irsa >/dev/null 2>&1 || true
+          # -----------------------------------
+
           terraform apply -auto-approve
 
-          kubectl get sc
+          echo "StorageClasses:"
+          kubectl get sc || true
+
+          echo "Terraform outputs:"
+          terraform output || true
         '''
       }
     }
@@ -136,14 +173,14 @@ pipeline {
           # Apply all manifests
           kubectl apply -n "$K8S_NAMESPACE" -f k8s/
 
-          # Update images
+          # Update images (kept as-is: '*' updates all containers in the deployment)
           kubectl -n "$K8S_NAMESPACE" set image deployment/movie-manager-frontend *=${ECR_FRONTEND}:${GIT_SHA}
           kubectl -n "$K8S_NAMESPACE" set image deployment/movie-manager-backend  *=${ECR_BACKEND}:${GIT_SHA}
 
-          # Wait for mongo to be ready (PVC + pod)
+          # Wait for mongo
           kubectl -n "$K8S_NAMESPACE" rollout status deployment/mongo --timeout=10m
 
-          # Re-run seed job every pipeline run (safe + deterministic)
+          # Re-run seed job every pipeline run
           kubectl -n "$K8S_NAMESPACE" delete job mongo-seed-movies --ignore-not-found=true
           kubectl -n "$K8S_NAMESPACE" apply -f k8s/mongo-seed-configmap.yaml
           kubectl -n "$K8S_NAMESPACE" apply -f k8s/mongo-seed-job.yaml
@@ -159,7 +196,7 @@ pipeline {
           echo "Ingress:"
           kubectl -n "$K8S_NAMESPACE" get ingress -o wide || true
 
-          echo "ALB hostname (may take 1-2 minutes to appear):"
+          echo "ALB hostname (may take a bit):"
           kubectl -n "$K8S_NAMESPACE" get ingress movie-manager-ingress -o jsonpath='{.status.loadBalancer.ingress[0].hostname}{"\\n"}' || true
         '''
       }
