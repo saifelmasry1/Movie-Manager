@@ -4,8 +4,10 @@ pipeline {
   options {
     timestamps()
     disableConcurrentBuilds()
-    // ansiColor('xterm')  // removed (AnsiColor plugin not installed)
   }
+
+  // No triggers here on purpose.
+  // You will click "Build Now" manually from the Jenkins UI.
 
   parameters {
     string(name: 'AWS_REGION', defaultValue: 'us-east-1', description: 'AWS Region (e.g. us-east-1)')
@@ -25,12 +27,6 @@ pipeline {
   }
 
   stages {
-    stage('Checkout') {
-      steps {
-        checkout scm
-      }
-    }
-
     stage('Prepare') {
       steps {
         script {
@@ -51,8 +47,9 @@ pipeline {
 
     stage('ECR Login + Ensure Repo') {
       steps {
-        sh '''
+        sh '''#!/usr/bin/env bash
           set -euo pipefail
+
           aws ecr describe-repositories --repository-names "${ECR_REPOSITORY}" --region "${AWS_REGION}" >/dev/null 2>&1 \
             || aws ecr create-repository --repository-name "${ECR_REPOSITORY}" --image-scanning-configuration scanOnPush=true --region "${AWS_REGION}" >/dev/null
 
@@ -63,8 +60,9 @@ pipeline {
 
     stage('Build Image') {
       steps {
-        sh '''
+        sh '''#!/usr/bin/env bash
           set -euo pipefail
+
           if [ ! -f "${DOCKERFILE}" ]; then
             echo "ERROR: Dockerfile not found at ${DOCKERFILE}"
             echo "Fix DOCKERFILE parameter (or add Dockerfile to repo)."
@@ -78,7 +76,7 @@ pipeline {
 
     stage('Push Image') {
       steps {
-        sh '''
+        sh '''#!/usr/bin/env bash
           set -euo pipefail
           docker push "${IMAGE_URI}"
         '''
@@ -88,7 +86,7 @@ pipeline {
     stage('Deploy to EKS (manual toggle)') {
       when { expression { return params.DEPLOY_TO_EKS } }
       steps {
-        sh '''
+        sh '''#!/usr/bin/env bash
           set -euo pipefail
 
           aws eks update-kubeconfig --region "${AWS_REGION}" --name "${EKS_CLUSTER_NAME}"
@@ -115,9 +113,7 @@ pipeline {
 
   post {
     always {
-      sh '''
-        docker system prune -af >/dev/null 2>&1 || true
-      '''
+      sh 'docker system prune -af >/dev/null 2>&1 || true'
     }
   }
 }
