@@ -19,20 +19,22 @@ pipeline {
     string(name: 'K8S_CONTAINER', defaultValue: 'movie-manager', description: 'Container name in the deployment (optional)')
   }
 
-  environment {
-    AWS_REGION        = "${params.AWS_REGION}"
-    AWS_DEFAULT_REGION = "${params.AWS_REGION}"
+environment {
+  AWS_REGION         = "${params.AWS_REGION}"
+  AWS_DEFAULT_REGION = "${params.AWS_REGION}"
 
-    EKS_CLUSTER_NAME  = "${params.EKS_CLUSTER_NAME}"
-    ECR_REPOSITORY    = "${params.ECR_REPOSITORY}"
-    DOCKER_CONTEXT    = "${params.DOCKER_CONTEXT}"
-    DOCKERFILE        = "${params.DOCKERFILE}"
+  EKS_CLUSTER_NAME   = "${params.EKS_CLUSTER_NAME}"
+  ECR_REPOSITORY     = "${params.ECR_REPOSITORY}"
 
-    K8S_MANIFEST_PATH = "${params.K8S_MANIFEST_PATH}"
-    K8S_NAMESPACE     = "${params.K8S_NAMESPACE}"
-    K8S_DEPLOYMENT    = "${params.K8S_DEPLOYMENT}"
-    K8S_CONTAINER     = "${params.K8S_CONTAINER}"
-  }
+  BUILD_CONTEXT      = "${params.DOCKER_CONTEXT}"   // ✅ بدل DOCKER_CONTEXT
+  DOCKERFILE         = "${params.DOCKERFILE}"
+
+  K8S_MANIFEST_PATH  = "${params.K8S_MANIFEST_PATH}"
+  K8S_NAMESPACE      = "${params.K8S_NAMESPACE}"
+  K8S_DEPLOYMENT     = "${params.K8S_DEPLOYMENT}"
+  K8S_CONTAINER      = "${params.K8S_CONTAINER}"
+}
+
 
   stages {
     stage('Prepare') {
@@ -76,7 +78,7 @@ pipeline {
             exit 1
           fi
 
-          docker build -f "${DOCKERFILE}" -t "${IMAGE_URI}" "${DOCKER_CONTEXT}"
+          docker build -f "${DOCKERFILE}" -t "${IMAGE_URI}" "${BUILD_CONTEXT}"
         '''
       }
     }
