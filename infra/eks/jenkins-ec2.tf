@@ -1,6 +1,6 @@
 // infra/eks/jenkins-ec2.tf
-// Creates a dedicated Ubuntu EC2 instance for Jenkins (bootstrapped via user-data).
-// It will be created during the SAME `terraform apply` that creates the EKS cluster + nodegroup.
+// Ubuntu EC2 for Jenkins (bootstrapped via user-data).
+// Created during the same `terraform apply` as the EKS cluster.
 
 data "aws_region" "current" {}
 
@@ -33,21 +33,31 @@ variable "jenkins_root_volume_gb" {
 
 variable "jenkins_admin_cidrs" {
   type        = list(string)
-  description = "CIDRs allowed to access SSH(22) + Jenkins(8080). Use your public IP/32."
+  description = "CIDRs allowed to access SSH(22) + Jenkins(8080)."
   default     = ["0.0.0.0/0"]
 }
 
 variable "jenkins_key_name" {
   type        = string
-  description = "Optional EC2 key pair name for SSH. Leave empty to rely on SSM (recommended)."
-  default     = ""
+  description = "EC2 KeyPair name to attach to Jenkins instance (AWS EC2 KeyPairs in the same region)."
+  default     = "azza"
+
+  validation {
+    condition     = length(trimspace(var.jenkins_key_name)) > 0
+    error_message = "jenkins_key_name must not be empty."
+  }
+}
+
+variable "jenkins_private_key_path" {
+  type        = string
+  description = "Local path to the PEM (ONLY used for SSH hint output). Not used by AWS."
+  default     = "~/.ssh/azza.pem"
 }
 
 locals {
   jenkins_name = "jenkins-ec2"
 }
 
-# Security Group for Jenkins
 resource "aws_security_group" "jenkins_sg" {
   name        = "${local.jenkins_name}-sg"
   description = "Jenkins EC2 SG (8080 + 22)"
@@ -62,7 +72,7 @@ resource "aws_security_group" "jenkins_sg" {
   }
 
   ingress {
-    description = "SSH (optional)"
+    description = "SSH"
     from_port   = 22
     to_port     = 22
     protocol    = "tcp"
@@ -82,7 +92,6 @@ resource "aws_security_group" "jenkins_sg" {
   }
 }
 
-# IAM role for Jenkins EC2 (instance profile)
 data "aws_iam_policy_document" "jenkins_assume_role" {
   statement {
     actions = ["sts:AssumeRole"]
@@ -98,7 +107,6 @@ resource "aws_iam_role" "jenkins_role" {
   assume_role_policy = data.aws_iam_policy_document.jenkins_assume_role.json
 }
 
-# Minimal inline permissions: EKS describe + ECR push
 data "aws_iam_policy_document" "jenkins_inline" {
   statement {
     sid     = "EKSDescribe"
@@ -127,8 +135,8 @@ data "aws_iam_policy_document" "jenkins_inline" {
   }
 
   statement {
-    sid     = "STSIdentity"
-    actions = ["sts:GetCallerIdentity"]
+    sid       = "STSIdentity"
+    actions   = ["sts:GetCallerIdentity"]
     resources = ["*"]
   }
 }
@@ -137,12 +145,6 @@ resource "aws_iam_role_policy" "jenkins_inline" {
   name   = "${local.jenkins_name}-inline"
   role   = aws_iam_role.jenkins_role.id
   policy = data.aws_iam_policy_document.jenkins_inline.json
-}
-
-# (Optional but very useful) SSM access without SSH
-resource "aws_iam_role_policy_attachment" "jenkins_ssm" {
-  role       = aws_iam_role.jenkins_role.name
-  policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
 }
 
 resource "aws_iam_instance_profile" "jenkins_profile" {
@@ -159,8 +161,9 @@ resource "aws_instance" "jenkins" {
 
   iam_instance_profile = aws_iam_instance_profile.jenkins_profile.name
 
-  key_name  = var.jenkins_key_name != "" ? var.jenkins_key_name : null
-  user_data = file("${path.module}/userdata/jenkins-ubuntu.sh")
+  key_name                    = var.jenkins_key_name
+  user_data                   = file("${path.module}/userdata/jenkins-ubuntu.sh")
+  user_data_replace_on_change = true
 
   root_block_device {
     volume_size = var.jenkins_root_volume_gb
@@ -171,8 +174,11 @@ resource "aws_instance" "jenkins" {
     Name = local.jenkins_name
   }
 
-  # Create Jenkins EC2 alongside the cluster
   depends_on = [aws_eks_cluster.eks]
+}
+
+output "jenkins_instance_id" {
+  value = aws_instance.jenkins.id
 }
 
 output "jenkins_public_ip" {
@@ -183,6 +189,6 @@ output "jenkins_url" {
   value = "http://${aws_instance.jenkins.public_ip}:8080"
 }
 
-output "jenkins_ssm_hint" {
-  value = "aws ssm start-session --target ${aws_instance.jenkins.id} --region ${data.aws_region.current.name}"
+output "jenkins_ssh_hint" {
+  value = "ssh -o IdentitiesOnly=yes -i ${var.jenkins_private_key_path} ubuntu@${aws_instance.jenkins.public_ip}"
 }

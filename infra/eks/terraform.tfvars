@@ -7,3 +7,8 @@ node_instance_type   = "t3.medium"
 desired_capacity     = 2
 min_size             = 1
 max_size             = 3
+jenkins_key_name         = "azza"
+jenkins_private_key_path = "~/.ssh/azza.pem"
+
+
+

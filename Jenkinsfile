@@ -4,11 +4,8 @@ pipeline {
   options {
     timestamps()
     disableConcurrentBuilds()
-    ansiColor('xterm')
+    // ansiColor('xterm')  // removed (AnsiColor plugin not installed)
   }
-
-  // No triggers here on purpose.
-  // You will click "Build Now" manually from the Jenkins UI.
 
   parameters {
     string(name: 'AWS_REGION', defaultValue: 'us-east-1', description: 'AWS Region (e.g. us-east-1)')
@@ -24,7 +21,6 @@ pipeline {
   }
 
   environment {
-    // Jenkins on EC2 will use the instance profile IAM role (no static AWS keys)
     AWS_DEFAULT_REGION = "${params.AWS_REGION}"
   }
 
@@ -108,11 +104,9 @@ pipeline {
             exit 1
           fi
 
-          # Optional: update a deployment image (works if you use a Deployment)
           kubectl -n "${K8S_NAMESPACE}" get deploy "${K8S_DEPLOYMENT}" >/dev/null 2>&1 && \
             kubectl -n "${K8S_NAMESPACE}" set image "deployment/${K8S_DEPLOYMENT}" "${K8S_CONTAINER}=${IMAGE_URI}" --record || true
 
-          # Optional rollout status (won’t fail if deployment not found)
           kubectl -n "${K8S_NAMESPACE}" rollout status "deployment/${K8S_DEPLOYMENT}" --timeout=3m || true
         '''
       }

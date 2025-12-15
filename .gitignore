@@ -39,3 +39,9 @@ crash.*.log
 **/*.tfstate
 **/*.tfstate.*
 **/.terraform.lock.hcl
+
+# SSH keys
+azza.pem
+azza.pub
+*.pem
+*.pub
