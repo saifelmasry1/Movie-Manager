@@ -155,8 +155,17 @@ pipeline {
             fi
           fi
 
-          # (Optional but safe) Import storage class if it already exists
+          # Import storage class if it already exists
           terraform import kubernetes_storage_class_v1.gp3 gp3 >/dev/null 2>&1 || true
+
+          # ✅ Import kube-prometheus-stack Helm release if it already exists (prevents: cannot re-use a name that is still in use)
+          RELEASE_NS="monitoring"
+          RELEASE_NAME="kube-prometheus-stack"
+          if ! terraform state show helm_release.kps >/dev/null 2>&1; then
+            if helm -n "$RELEASE_NS" status "$RELEASE_NAME" >/dev/null 2>&1; then
+              terraform import helm_release.kps "${RELEASE_NS}/${RELEASE_NAME}" >/dev/null 2>&1 || true
+            fi
+          fi
 
           # If the role is tainted from a previous failure, untaint it so no delete/recreate happens
           terraform untaint aws_iam_role.ebs_csi_irsa >/dev/null 2>&1 || true
@@ -176,20 +185,20 @@ pipeline {
 
           kubectl apply -n "$K8S_NAMESPACE" -f k8s/
 
-          # Update images safely (use explicit container names)
-          kubectl -n "$K8S_NAMESPACE" set image deployment/movie-manager-frontend movie-manager-frontend=${ECR_FRONTEND}:${GIT_SHA}
-          kubectl -n "$K8S_NAMESPACE" set image deployment/movie-manager-backend  movie-manager-backend=${ECR_BACKEND}:${GIT_SHA}
+          # Update images (explicit container names) + fallback to wildcard if names differ
+          kubectl -n "$K8S_NAMESPACE" set image deployment/movie-manager-frontend movie-manager-frontend=${ECR_FRONTEND}:${GIT_SHA} \
+            || kubectl -n "$K8S_NAMESPACE" set image deployment/movie-manager-frontend *=${ECR_FRONTEND}:${GIT_SHA}
 
-          # Ensure mongo is ready before seeding
+          kubectl -n "$K8S_NAMESPACE" set image deployment/movie-manager-backend  movie-manager-backend=${ECR_BACKEND}:${GIT_SHA} \
+            || kubectl -n "$K8S_NAMESPACE" set image deployment/movie-manager-backend  *=${ECR_BACKEND}:${GIT_SHA}
+
           kubectl -n "$K8S_NAMESPACE" rollout status deployment/mongo --timeout=10m
 
-          # Re-run seed job
           kubectl -n "$K8S_NAMESPACE" delete job mongo-seed-movies --ignore-not-found=true
           kubectl -n "$K8S_NAMESPACE" apply -f k8s/mongo-seed-configmap.yaml
           kubectl -n "$K8S_NAMESPACE" apply -f k8s/mongo-seed-job.yaml
           kubectl -n "$K8S_NAMESPACE" wait --for=condition=complete job/mongo-seed-movies --timeout=10m
 
-          # Wait for app rollouts
           kubectl -n "$K8S_NAMESPACE" rollout status deployment/movie-manager-frontend --timeout=6m
           kubectl -n "$K8S_NAMESPACE" rollout status deployment/movie-manager-backend  --timeout=6m
 
