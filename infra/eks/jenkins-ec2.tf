@@ -95,6 +95,7 @@ resource "aws_security_group" "jenkins_sg" {
 data "aws_iam_policy_document" "jenkins_assume_role" {
   statement {
     actions = ["sts:AssumeRole"]
+
     principals {
       type        = "Service"
       identifiers = ["ec2.amazonaws.com"]
@@ -108,14 +109,98 @@ resource "aws_iam_role" "jenkins_role" {
 }
 
 data "aws_iam_policy_document" "jenkins_inline" {
+
+  # Needed for: aws eks update-kubeconfig, kubectl auth, eksctl utils associate-iam-oidc-provider
+  # Fixes your exact error: eks:DescribeClusterVersions
   statement {
-    sid     = "EKSDescribe"
-    actions = ["eks:DescribeCluster"]
-    resources = [
-      aws_eks_cluster.eks.arn
+    sid = "EKSRead"
+    actions = [
+      "eks:Describe*",
+      "eks:List*",
+      "eks:AccessKubernetesApi"
     ]
+    resources = ["*"]
   }
 
+  # Needed for: terraform in infra/monitoring (aws_eks_addon for ebs csi)
+  statement {
+    sid = "EKSAddons"
+    actions = [
+      "eks:CreateAddon",
+      "eks:UpdateAddon",
+      "eks:DeleteAddon",
+      "eks:DescribeAddon",
+      "eks:ListAddons",
+      "eks:DescribeAddonVersions",
+      "eks:TagResource",
+      "eks:UntagResource"
+    ]
+    resources = ["*"]
+  }
+
+  # Needed for: eksctl IRSA + OIDC provider + policy creation (aws-lbc-cli.sh)
+  statement {
+    sid = "IAMForEksctlAndTerraform"
+    actions = [
+      "iam:CreateOpenIDConnectProvider",
+      "iam:GetOpenIDConnectProvider",
+      "iam:ListOpenIDConnectProviders",
+      "iam:TagOpenIDConnectProvider",
+      "iam:UpdateOpenIDConnectProviderThumbprint",
+
+      "iam:CreatePolicy",
+      "iam:GetPolicy",
+      "iam:ListPolicies",
+      "iam:DeletePolicy",
+
+      "iam:CreateRole",
+      "iam:GetRole",
+      "iam:DeleteRole",
+      "iam:TagRole",
+      "iam:UntagRole",
+      "iam:AttachRolePolicy",
+      "iam:DetachRolePolicy",
+      "iam:PutRolePolicy",
+      "iam:DeleteRolePolicy",
+      "iam:PassRole"
+    ]
+    resources = ["*"]
+  }
+
+  # Needed for: eksctl create iamserviceaccount (it uses CloudFormation stacks)
+  statement {
+    sid = "CloudFormationForEksctl"
+    actions = [
+      "cloudformation:CreateStack",
+      "cloudformation:DeleteStack",
+      "cloudformation:DescribeStacks",
+      "cloudformation:DescribeStackEvents",
+      "cloudformation:DescribeStackResources",
+      "cloudformation:GetTemplate",
+      "cloudformation:ListStacks",
+      "cloudformation:ListStackResources",
+      "cloudformation:UpdateStack",
+      "cloudformation:UpdateTerminationProtection"
+    ]
+    resources = ["*"]
+  }
+
+  # Optional but helpful for tooling/diagnostics
+  statement {
+    sid = "EC2Describe"
+    actions = [
+      "ec2:DescribeVpcs",
+      "ec2:DescribeSubnets",
+      "ec2:DescribeSecurityGroups",
+      "ec2:DescribeAvailabilityZones",
+      "ec2:DescribeRouteTables",
+      "ec2:DescribeInternetGateways",
+      "ec2:DescribeNatGateways"
+    ]
+    resources = ["*"]
+  }
+
+  # ECR push/pull for images
   statement {
     sid = "ECRPushPull"
     actions = [
@@ -158,10 +243,9 @@ resource "aws_instance" "jenkins" {
   subnet_id                   = aws_subnet.public[0].id
   vpc_security_group_ids      = [aws_security_group.jenkins_sg.id]
   associate_public_ip_address = true
-
-  iam_instance_profile = aws_iam_instance_profile.jenkins_profile.name
-
+  iam_instance_profile        = aws_iam_instance_profile.jenkins_profile.name
   key_name                    = var.jenkins_key_name
+
   user_data                   = file("${path.module}/userdata/jenkins-ubuntu.sh")
   user_data_replace_on_change = true
 
@@ -193,6 +277,7 @@ output "jenkins_ssh_hint" {
   value = "ssh -o IdentitiesOnly=yes -i ${var.jenkins_private_key_path} ubuntu@${aws_instance.jenkins.public_ip}"
 }
 
+# Allow Jenkins EC2 SG to reach EKS API server SG on 443
 resource "aws_security_group_rule" "jenkins_to_eks_api" {
   type                     = "ingress"
   from_port                = 443
