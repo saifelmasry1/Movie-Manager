@@ -11,6 +11,7 @@ pipeline {
     string(name: 'AWS_REGION',    defaultValue: 'us-east-1', description: 'AWS Region')
     string(name: 'CLUSTER_NAME',  defaultValue: 'depi-eks',  description: 'EKS Cluster Name')
     string(name: 'K8S_NAMESPACE', defaultValue: 'default',   description: 'Namespace for app manifests')
+    booleanParam(name: 'RUN_SEED', defaultValue: true, description: 'Run Mongo seed job after deploy')
   }
 
   environment {
@@ -34,14 +35,10 @@ pipeline {
           env.ECR_FRONTEND = "${env.ECR_REGISTRY}/movie-manager-frontend"
           env.ECR_BACKEND  = "${env.ECR_REGISTRY}/movie-manager-backend"
 
-          env.EBS_CSI_ROLE_NAME  = "${env.CLUSTER_NAME}-ebs-csi-irsa"
-          env.EBS_CSI_POLICY_ARN = "arn:aws:iam::aws:policy/service-role/AmazonEBSCSIDriverPolicy"
-
           echo "ACCOUNT_ID   = ${env.ACCOUNT_ID}"
           echo "GIT_SHA      = ${env.GIT_SHA}"
           echo "ECR_FRONTEND = ${env.ECR_FRONTEND}"
           echo "ECR_BACKEND  = ${env.ECR_BACKEND}"
-          echo "EBS_CSI_ROLE = ${env.EBS_CSI_ROLE_NAME}"
         }
       }
     }
@@ -110,101 +107,45 @@ pipeline {
       }
     }
 
-    stage('Install AWS Load Balancer Controller (ALB)') {
-      steps {
-        sh '''
-          set -e
-          chmod +x infra/addons/aws-lbc-cli.sh
-
-          VPC_ID="$(aws eks describe-cluster --name "$CLUSTER_NAME" --region "$AWS_REGION" \
-            --query "cluster.resourcesVpcConfig.vpcId" --output text)"
-
-          bash infra/addons/aws-lbc-cli.sh \
-            --cluster "$CLUSTER_NAME" \
-            --region "$AWS_REGION" \
-            --vpc-id "$VPC_ID" \
-            --no-sample
-
-          kubectl -n kube-system rollout status deploy/aws-load-balancer-controller --timeout=10m
-          kubectl get ingressclass alb || true
-        '''
-      }
-    }
-
-    stage('Terraform: Monitoring Addons (EBS CSI + gp3 default)') {
-      steps {
-        sh '''
-          set -e
-          cd infra/monitoring
-
-          terraform fmt -recursive
-          terraform init -upgrade
-
-          # Import existing namespace (prevents "namespace already exists")
-          terraform import kubernetes_namespace_v1.monitoring monitoring >/dev/null 2>&1 || true
-
-          # Import existing IAM role/attachment if they already exist
-          terraform import aws_iam_role.ebs_csi_irsa "${EBS_CSI_ROLE_NAME}" >/dev/null 2>&1 || true
-          terraform import aws_iam_role_policy_attachment.ebs_csi "${EBS_CSI_ROLE_NAME}/${EBS_CSI_POLICY_ARN}" >/dev/null 2>&1 || true
-
-          # Import EBS CSI addon if it already exists in EKS (prevents 409 Addon already exists)
-          ADDON_NAME="aws-ebs-csi-driver"
-          if ! terraform state show aws_eks_addon.ebs_csi >/dev/null 2>&1; then
-            if aws eks describe-addon --cluster-name "$CLUSTER_NAME" --addon-name "$ADDON_NAME" --region "$AWS_REGION" >/dev/null 2>&1; then
-              terraform import aws_eks_addon.ebs_csi "${CLUSTER_NAME}:${ADDON_NAME}" >/dev/null 2>&1 || true
-            fi
-          fi
-
-          # Import storage class if it already exists
-          terraform import kubernetes_storage_class_v1.gp3 gp3 >/dev/null 2>&1 || true
-
-          # ✅ Import kube-prometheus-stack Helm release if it already exists (prevents: cannot re-use a name that is still in use)
-          RELEASE_NS="monitoring"
-          RELEASE_NAME="kube-prometheus-stack"
-          if ! terraform state show helm_release.kps >/dev/null 2>&1; then
-            if helm -n "$RELEASE_NS" status "$RELEASE_NAME" >/dev/null 2>&1; then
-              terraform import helm_release.kps "${RELEASE_NS}/${RELEASE_NAME}" >/dev/null 2>&1 || true
-            fi
-          fi
-
-          # If the role is tainted from a previous failure, untaint it so no delete/recreate happens
-          terraform untaint aws_iam_role.ebs_csi_irsa >/dev/null 2>&1 || true
-
-          terraform apply -auto-approve
-
-          kubectl get sc || true
-          terraform output || true
-        '''
-      }
-    }
-
-    stage('Deploy App to EKS + Seed Mongo') {
+    stage('Deploy App to EKS') {
       steps {
         sh '''
           set -e
 
+          # Apply manifests
           kubectl apply -n "$K8S_NAMESPACE" -f k8s/
 
-          # Update images (explicit container names) + fallback to wildcard if names differ
+          # Update images (explicit container names) + fallback wildcard
           kubectl -n "$K8S_NAMESPACE" set image deployment/movie-manager-frontend movie-manager-frontend=${ECR_FRONTEND}:${GIT_SHA} \
             || kubectl -n "$K8S_NAMESPACE" set image deployment/movie-manager-frontend *=${ECR_FRONTEND}:${GIT_SHA}
 
-          kubectl -n "$K8S_NAMESPACE" set image deployment/movie-manager-backend  movie-manager-backend=${ECR_BACKEND}:${GIT_SHA} \
-            || kubectl -n "$K8S_NAMESPACE" set image deployment/movie-manager-backend  *=${ECR_BACKEND}:${GIT_SHA}
+          kubectl -n "$K8S_NAMESPACE" set image deployment/movie-manager-backend movie-manager-backend=${ECR_BACKEND}:${GIT_SHA} \
+            || kubectl -n "$K8S_NAMESPACE" set image deployment/movie-manager-backend *=${ECR_BACKEND}:${GIT_SHA}
 
-          kubectl -n "$K8S_NAMESPACE" rollout status deployment/mongo --timeout=10m
+          # Wait for rollouts
+          kubectl -n "$K8S_NAMESPACE" rollout status deployment/mongo --timeout=10m || true
+          kubectl -n "$K8S_NAMESPACE" rollout status deployment/movie-manager-frontend --timeout=10m
+          kubectl -n "$K8S_NAMESPACE" rollout status deployment/movie-manager-backend  --timeout=10m
+
+          kubectl -n "$K8S_NAMESPACE" get pods -o wide || true
+          kubectl -n "$K8S_NAMESPACE" get svc -o wide  || true
+          kubectl -n "$K8S_NAMESPACE" get ingress -o wide || true
+        '''
+      }
+    }
+
+    stage('Seed Mongo') {
+      when { expression { return params.RUN_SEED } }
+      steps {
+        sh '''
+          set -e
 
           kubectl -n "$K8S_NAMESPACE" delete job mongo-seed-movies --ignore-not-found=true
           kubectl -n "$K8S_NAMESPACE" apply -f k8s/mongo-seed-configmap.yaml
           kubectl -n "$K8S_NAMESPACE" apply -f k8s/mongo-seed-job.yaml
           kubectl -n "$K8S_NAMESPACE" wait --for=condition=complete job/mongo-seed-movies --timeout=10m
 
-          kubectl -n "$K8S_NAMESPACE" rollout status deployment/movie-manager-frontend --timeout=6m
-          kubectl -n "$K8S_NAMESPACE" rollout status deployment/movie-manager-backend  --timeout=6m
-
-          kubectl -n "$K8S_NAMESPACE" get pods -o wide || true
-          kubectl -n "$K8S_NAMESPACE" get ingress -o wide || true
-          kubectl -n "$K8S_NAMESPACE" get ingress movie-manager-ingress -o jsonpath='{.status.loadBalancer.ingress[0].hostname}{"\\n"}' || true
+          echo "Seed done."
         '''
       }
     }
