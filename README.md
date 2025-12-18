@@ -1,578 +1,266 @@
-# Movie Manager on AWS EKS (Terraform + Kubernetes + Monitoring)
+# Movie Manager Project 🎬
 
-This repo deploys a simple **Movie Manager** app (Frontend + Backend + MongoDB) on **AWS EKS**, fronted by an **AWS ALB Ingress** (via AWS Load Balancer Controller), and adds **Monitoring** (Prometheus + Grafana) via **kube-prometheus-stack**.
+A comprehensive DevOps showcase project deploying a **Three-Tier Web Application** (React Frontend + Node.js Backend + MongoDB) on **AWS EKS**, featuring a complete CI/CD pipeline with **Jenkins**, and observability with **Prometheus & Grafana**.
 
-The goal of this README is to be a **step-by-step runbook**: copy/paste commands, see what “good” looks like, and verify each layer is healthy.
+## 🏗 Architecture
 
----
+```
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                                    AWS Cloud                                     │
+│  ┌───────────────────────────────────────────────────────────────────────────┐  │
+│  │                              VPC (10.0.0.0/16)                            │  │
+│  │                                                                           │  │
+│  │  ┌─────────────────────────┐    ┌─────────────────────────────────────┐  │  │
+│  │  │    Public Subnets       │    │         Private Subnets             │  │  │
+│  │  │                         │    │                                     │  │  │
+│  │  │  ┌───────────────────┐  │    │  ┌─────────────────────────────┐   │  │  │
+│  │  │  │  Jenkins Server   │  │    │  │      EKS Cluster (depi-eks) │   │  │  │
+│  │  │  │  (EC2 - t3.medium)│  │    │  │                             │   │  │  │
+│  │  │  │    :8080 (UI)     │  │    │  │  ┌─────────┐ ┌─────────┐   │   │  │  │
+│  │  │  │    :22 (SSH)      │  │    │  │  │Frontend │ │ Backend │   │   │  │  │
+│  │  │  └───────────────────┘  │    │  │  │  Pods   │ │  Pods   │   │   │  │  │
+│  │  │                         │    │  │  │  :3000  │ │  :5000  │   │   │  │  │
+│  │  │  ┌───────────────────┐  │    │  │  └────┬────┘ └────┬────┘   │   │  │  │
+│  │  │  │   ALB (Ingress)   │◄─┼────┼──┼───────┴──────────┘         │   │  │  │
+│  │  │  │  HTTP :80         │  │    │  │                             │   │  │  │
+│  │  │  └───────────────────┘  │    │  │  ┌─────────┐ ┌───────────┐ │   │  │  │
+│  │  │                         │    │  │  │ MongoDB │ │ EBS (gp3) │ │   │  │  │
+│  │  └─────────────────────────┘    │  │  │  :27017 │◄┤   PVC     │ │   │  │  │
+│  │                                 │  │  └─────────┘ └───────────┘ │   │  │  │
+│  │                                 │  └─────────────────────────────┘   │  │  │
+│  │                                 └─────────────────────────────────────┘  │  │
+│  └───────────────────────────────────────────────────────────────────────────┘  │
+│                                                                                  │
+│   ┌──────────────┐    ┌──────────────┐    ┌──────────────────────────────────┐  │
+│   │     ECR      │    │   Route 53   │    │  Monitoring (kube-prometheus)   │  │
+│   │  (Images)    │    │   (DNS)      │    │  Prometheus + Grafana + Alerts  │  │
+│   └──────────────┘    └──────────────┘    └──────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────────────────────────────┘
 
-## High-level architecture (routing + networks)
-
-```text
-                         ┌──────────────────────────────────────────────────┐
-                         │                      AWS                         │
-                         │                                                  │
-Internet                 │   VPC                                             │
-  │                      │   ┌───────────────┐     ┌─────────────────────┐  │
-  │ HTTP :80             │   │ Public Subnets│     │ Private Subnets      │  │
-  ▼                      │   │ (ALB lives)   │     │ (EKS Nodes live)     │  │
-┌─────────────────┐     │   └───────┬───────┘     └─────────┬───────────┘  │
-│  ALB (Ingress)  │◄────┤           │                         │              │
-│ (AWS LBC)       │     │   Target Groups (IP mode)           │              │
-│ Listener :80    │─────┤──────────────┬──────────────────────┘              │
-└───────┬─────────┘     │              │                                     │
-        │               │              │                                     │
-        │ Path Rules    │              │                                     │
-        │               │              │                                     │
-        │  "/"          │              │                                     │
-        ▼               │              ▼                                     │
-  ┌───────────────┐     │      ┌─────────────────────────┐                   │
-  │ Frontend TG   │─────┼─────►│ Service: movie-manager- │                   │
-  │ (to Pods IPs) │     │      │ frontend (ClusterIP:80) │                   │
-  └───────────────┘     │      └─────────────┬───────────┘                   │
-                        │                    │                               │
-                        │                    ▼                               │
-                        │          ┌───────────────────┐                     │
-                        │          │ Frontend Pods     │                     │
-                        │          │ serve static UI   │                     │
-                        │          │ (container :3000) │                     │
-                        │          └───────────────────┘                     │
-                        │                                                    │
-                        │  "/api/*"  and "/images/*"                         │
-                        ▼                                                    │
-                  ┌───────────────┐                                          │
-                  │ Backend TG    │─────────────────────────────────────────┐ │
-                  │ (to Pods IPs) │                                         │ │
-                  └───────────────┘                                         │ │
-                                                                            ▼ ▼
-                                                                ┌─────────────────────────┐
-                                                                │ Service: movie-manager- │
-                                                                │ backend (ClusterIP:5000)│
-                                                                └─────────────┬───────────┘
-                                                                              │
-                                                                              ▼
-                                                                    ┌───────────────────┐
-                                                                    │ Backend Pods      │
-                                                                    │ Express API       │
-                                                                    │ :5000             │
-                                                                    └─────────┬─────────┘
-                                                                              │
-                                                                              │ (ClusterIP DNS)
-                                                                              ▼
-                                                                    ┌───────────────────┐
-                                                                    │ Service: mongo    │
-                                                                    │ (ClusterIP:27017) │
-                                                                    └─────────┬─────────┘
-                                                                              │
-                                                                              ▼
-                                                                    ┌───────────────────┐
-                                                                    │ Mongo Pod         │
-                                                                    │ :27017            │
-                                                                    └───────────────────┘
-
-
-Monitoring is a separate namespace + separate ALB:
-
-Internet → ALB (Ingress in monitoring ns) → Service grafana → Grafana Pods
+                              ┌───────────────┐
+           Internet ─────────►│   Users/API   │
+                              └───────────────┘
 ```
 
-**Key routing idea:** the frontend uses **relative URLs** in production:
-- API: `/api/...`
-- Images: `/images/...`
+### Infrastructure Components
+| Component | Technology | Purpose |
+|-----------|------------|---------|
+| **Compute** | Amazon EKS | Managed Kubernetes cluster with node groups |
+| **CI/CD** | Jenkins on EC2 | Automated build, push, and deploy pipeline |
+| **Storage** | AWS EBS (gp3) | Persistent volume for MongoDB data |
+| **Networking** | AWS ALB | Ingress controller for HTTP traffic routing |
+| **Monitoring** | Prometheus + Grafana | Metrics collection and visualization |
 
-So the browser calls the same ALB hostname, and the Ingress routes to backend.
-
----
-
-## Repo layout (important folders)
-
-Typical layout you’ll use while following this README:
-
-- `infra/eks/` — Terraform for EKS + core addons (example: EBS CSI, LBC prerequisites, IAM policy, …)
-- `infra/monitoring/` — Terraform that installs kube-prometheus-stack + Grafana ALB Ingress
-- `k8s/` — Kubernetes manifests: `mongo.yaml`, `movie-manager-backend.yaml`, `movie-manager-frontend.yaml`, `movie-manager-ingress.yaml` (names may vary)
-- `app/frontend/` — Vite/React frontend + Dockerfile
-- `app/backend/` — Backend + Dockerfile
-
-(If your repo differs slightly, adjust paths, but the workflow stays the same.)
+### Application Stack
+| Layer | Technology | Port |
+|-------|------------|------|
+| **Frontend** | React.js (Vite) | 3000 |
+| **Backend** | Node.js + Express | 5000 |
+| **Database** | MongoDB | 27017 |
 
 ---
 
-## 0) Prerequisites
+---
 
-Tools on your machine:
+## 🧩 Project Big Picture & Workflow
 
-- AWS CLI v2 authenticated (`aws sts get-caller-identity` should work)
-- Terraform
-- kubectl
-- Docker
-- (Optional) Helm
+This diagram illustrates the **complete DevOps lifecycle**, showing how the tools interact from code commit to production monitoring.
 
-AWS variables used in commands:
+```
+                                  🚀 CI/CD PIPELINE (Jenkins)
+                                  ───────────────────────────
+                                         │
+    👨‍💻 Developer                         │       🐳 Docker Build
+    │ (git push)                         │      ┌───────────────┐
+    ▼                                    ▼      │               │
+  ┌──────────┐    webhook     ┌──────────────┐  │  ┌─────────┐  │    push    ┌─────────────┐
+  │  GitHub  │───────────────►│    Jenkins   │──┼─►│  Image  │──┼───────────►│  Amazon ECR │
+  │ (Source) │                │  (on EC2)    │  │  └─────────┘  │            │ (Registry)  │
+  └──────────┘                └──┬────────┬──┘  └───────────────┘            └──────┬──────┘
+                                 │        │                                         │
+                                 │        │ (kubectl apply)                         │ (pull image)
+             (terraform apply)   │        │                                         │
+                                 │        ▼                                         ▼
+  ┌──────────────────────────────┼─────────────────────────────────────────────────────────────┐
+  │  INFRASTRUCTURE AS CODE      │                   RUNTIME ENVIRONMENT (AWS)                 │
+  │                              │                                                             │
+  │    ┌──────────────┐          │          ┌──────────────────────────────────────────────┐   │
+  │    │  Terraform   │          │          │           Amazon EKS Cluster                 │   │
+  │    │ (Provision)  │──────────┘          │                                              │   │
+  │    └──────────────┘ Creates             │   ┌─────────────┐      ┌─────────────┐       │   │
+  │           │                             │   │  Frontend   │      │   Backend   │       │   │
+  │           ▼                             │   │    Pod      │◄────►│     Pod     │       │   │
+  │    ┌──────────────┐                     │   └─────────────┘      └──────┬──────┘       │   │
+  │    │     AWS      │                     │          ▲                    │              │   │
+  │    │  Resources   │                     │          │                    ▼              │   │
+  │    │ (VPC, EKS,   │                     │          │             ┌─────────────┐       │   │
+  │    │  IAM, EC2)   │                     │          │             │   MongoDB   │       │   │
+  │    └──────────────┘                     │          │             │     Pod     │       │   │
+  │                                         │          │             └─────────────┘       │   │
+  │                                         └──────────┼───────────────────────────────────┘   │
+  │                                                    │                                       │
+  │                                                    │ (Route Traffic)                       │
+  │                                                    │                                       │
+  │                                         ┌──────────┴──────────┐                            │
+  │                                         │      AWS ALB        │                            │
+  │                                         │ (Load Balancer)     │                            │
+  │                                         └──────────┬──────────┘                            │
+  │                                                    │                                       │
+  └────────────────────────────────────────────────────┼───────────────────────────────────────┘
+                                                       │
+                                                       ▼
+                                                🌍 End Users
+```
+
+### 🛠️ Tools & Technologies Stack
+
+| Phase | Tool | Logo | Description |
+|-------|------|------|-------------|
+| **Source Control** | **Git / GitHub** | 🐙 | Stores code and history. Triggers builds. |
+| **CI/CD** | **Jenkins** | 🤵 | Automates building images and deploying manifests. |
+| **Infrastructure** | **Terraform** | 💜 | Provisions VPC, EKS, and IAM roles as code. |
+| **Containerization**| **Docker** | 🐳 | Packages the app into portable images. |
+| **Orchestration** | **Kubernetes (EKS)**| ☸️ | Manages and scales the application containers. |
+| **Registry** | **Amazon ECR** | 📦 | Securely stores Docker images. |
+| **Database** | **MongoDB** | 🍃 | NoSQL database for storing movie data. |
+| **Monitoring** | **Prometheus** | 🔥 | Collects metrics from the cluster. |
+| **Visualization** | **Grafana** | 📊 | Displays metrics on dashboards. |
+
+---
+
+## 📂 Repository Structure
+
+```
+├── app/                  # Application Source Code
+│   ├── backend/          # Node.js API + Dockerfile
+│   ├── frontend/         # React App + Dockerfile
+│   └── docker-compose.yml # Local development setup
+├── infra/                # Infrastructure as Code (Terraform)
+│   ├── eks/              # EKS Cluster + Jenkins EC2 + IAM
+│   ├── monitoring/       # Prometheus & Grafana Setup
+│   └── addons/           # Helper scripts (AWS LBC, etc.)
+├── k8s/                  # Kubernetes Manifests (App & DB)
+├── scripts/              # Utility scripts
+├── Jenkinsfile           # CI/CD Pipeline Definition
+├── pre_destroy_check.sh  # Safety check script before destroy
+└── README.md             # This file
+```
+
+---
+
+## 🚀 Getting Started
+
+### 1. Local Development (Docker Compose)
+Run the application locally without AWS.
 
 ```bash
-export ACCOUNT_ID="<YOUR_AWS_ACCOUNT_ID>"
-export AWS_REGION="us-east-1"
+cd app
+docker compose up --build
+```
+- Frontend: [http://localhost:3000](http://localhost:3000)
+- Backend: [http://localhost:5000/api/movies](http://localhost:5000/api/movies)
+- MongoDB: `mongodb://localhost:27018/movie_manager`
+
+To seed the database locally:
+```bash
+docker compose exec backend npm run seed
 ```
 
 ---
 
-## 1) Terraform: Provision EKS (infra/eks)
+## ☁️ AWS Deployment Guide
 
-> Run this from the repo root.
+### Prerequisites
+- AWS CLI v2 configured.
+- Terraform installed.
+- `kubectl` installed.
+
+### Step 1: Provision Infrastructure (EKS + Jenkins)
+This step creates the EKS cluster and a Jenkins Server on EC2.
 
 ```bash
 cd infra/eks
 terraform init
-terraform fmt -recursive
-terraform validate
-terraform plan -out tfplan
-terraform apply tfplan
+terraform apply -auto-approve
 ```
 
-### Configure kubectl for the new cluster
+**Terraform Outputs to note:**
+- `jenkins_url`: URL to access Jenkins.
+- `jenkins_public_ip`: IP of Jenkins server.
+- `cluster_name`: Name of the EKS cluster.
+- `jenkins_ssh_hint`: Command to SSH into Jenkins.
 
-Replace `<CLUSTER_NAME>` with whatever your Terraform creates.
+### Step 2: Configure Local `kubectl`
+Connect your local terminal to the new EKS cluster.
 
 ```bash
-aws eks update-kubeconfig --region "$AWS_REGION" --name "<CLUSTER_NAME>"
-kubectl get nodes -o wide
+aws eks update-kubeconfig --region us-east-1 --name <CLUSTER_NAME>
 ```
 
-**Good sign:** you see nodes in `Ready`.
-
----
-
-## 2) Terraform: Install Monitoring (infra/monitoring)
+### Step 3: Install AWS Load Balancer Controller (LBC)
+Crucial for Ingress to work. We use a helper script for this.
 
 ```bash
-cd ../../infra/monitoring
+# From repo root
+cd infra/addons
+chmod +x aws-lbc-cli.sh
+./aws-lbc-cli.sh --no-sample
+```
+*Note: Ensure your `kubectl` context is set to the correct cluster.*
+
+### Step 4: Deploy Monitoring (Optional)
+Deploys Prometheus and Grafana.
+
+```bash
+cd infra/monitoring
 terraform init
-terraform fmt -recursive
-terraform validate
-terraform plan -out tfplan
-terraform apply tfplan
+terraform apply -auto-approve
 ```
-
-### Get Grafana URL
-
-If monitoring creates an Ingress called `grafana-alb`:
-
-```bash
-kubectl get ingress -n monitoring
-kubectl get ingress -n monitoring grafana-alb -o jsonpath='{.status.loadBalancer.ingress[0].hostname}{"\n"}'
-```
-
-### Get Grafana admin password (kube-prometheus-stack)
-
-Common secret name pattern (adjust if your release name differs):
-
-```bash
-kubectl get secret -n monitoring | grep -i grafana
-kubectl get secret -n monitoring kube-prometheus-stack-grafana -o jsonpath='{.data.admin-password}' | base64 -d; echo
-```
-
-Login:
-- user: `admin`
-- password: (from the command above)
+*Use `kubectl get ingress -n monitoring` to find the Grafana URL.*
 
 ---
 
-## 3) Deploy Movie Manager to the cluster (k8s)
+## 🤖 CI/CD with Jenkins
 
-From repo root:
+The infrastructure includes a pre-configured Jenkins server.
 
-```bash
-kubectl apply -f k8s/mongo.yaml
-kubectl apply -f k8s/movie-manager-backend.yaml
-kubectl apply -f k8s/movie-manager-frontend.yaml
-kubectl apply -f k8s/movie-manager-ingress.yaml   # if you have it
-```
-
-Wait for rollouts:
-
-```bash
-kubectl rollout status deploy/mongo --timeout=5m || true
-kubectl rollout status deploy/movie-manager-backend --timeout=5m
-kubectl rollout status deploy/movie-manager-frontend --timeout=5m
-```
-
-Check resources:
-
-```bash
-kubectl get deploy,pods,svc,ingress
-kubectl get events --sort-by=.lastTimestamp | tail -n 30
-```
-
-### Get the Movie Manager ALB DNS
-
-```bash
-ALB=$(kubectl get ingress movie-manager-ingress -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
-echo "$ALB"
-```
+1. **Access Jenkins**: Open `http://<JENKINS_PUBLIC_IP>:8080` in your browser.
+2. **Initial Setup**: SSH into the box to get the initial admin password if prompted (or check Terraform output logs/userdata).
+3. **Pipeline**: Create a new Pipeline job and point it to this repository.
+4. **Run Build**: The `Jenkinsfile` will:
+   - Build Docker images.
+   - Push to Amazon ECR.
+   - Deploy/Update manifests to EKS.
 
 ---
 
-## 4) Build & Push Docker Images to ECR
-
-### 4.1 Login to ECR
-
-```bash
-aws ecr get-login-password --region "$AWS_REGION" \
-  | docker login --username AWS --password-stdin \
-  "$ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com"
-```
-
-> If the ECR repo doesn’t exist yet, create it:
-```bash
-aws ecr describe-repositories --repository-names movie-manager-backend --region "$AWS_REGION" >/dev/null 2>&1 \
-  || aws ecr create-repository --repository-name movie-manager-backend --region "$AWS_REGION"
-
-aws ecr describe-repositories --repository-names movie-manager-frontend --region "$AWS_REGION" >/dev/null 2>&1 \
-  || aws ecr create-repository --repository-name movie-manager-frontend --region "$AWS_REGION"
-```
-
----
-
-## 5) Practical example: Backend Build & Push (ECR) + Deploy + Verify
-
-This section mirrors the “frontend style” flow: **Build → Push → Update → Verify**.
-
-### 5.1 Choose a tag
-
-Use immutable tags when you can (best practice):
+## 🛠 Manual Kubernetes Deployment
+If you prefer to deploy manually without Jenkins:
 
 ```bash
-TAG=eks-backend-$(date +%Y%m%d%H%M)
-echo "$TAG"
-```
-
-### 5.2 Build backend image
-
-Assuming your backend Dockerfile is at `app/backend/Dockerfile`:
-
-```bash
-docker build \
-  -t "$ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/movie-manager-backend:$TAG" \
-  -f app/backend/Dockerfile app/backend
-```
-
-**If your cluster nodes are x86_64 and you build on Apple Silicon**, add:
-```bash
-# docker build --platform linux/amd64 ...
-```
-
-### 5.3 Push backend image
-
-```bash
-docker push "$ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/movie-manager-backend:$TAG"
-```
-
-### 5.4 Update deployment on the cluster
-
-#### Option A (recommended): set the deployment image to the new immutable tag
-
-```bash
-kubectl set image deploy/movie-manager-backend \
-  backend="$ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/movie-manager-backend:$TAG"
-
-kubectl rollout status deploy/movie-manager-backend --timeout=5m
-```
-
-#### Option B (lab/demo): keep `:latest` + `imagePullPolicy: Always`
-
-If your manifest is using `:latest` and you push a new `:latest`, you must restart pods to force a pull:
-
-```bash
-kubectl rollout restart deploy/movie-manager-backend
-kubectl rollout status deploy/movie-manager-backend --timeout=5m
-```
-
-Check what the cluster is running:
-
-```bash
-kubectl get deploy movie-manager-backend -o jsonpath='{.spec.template.spec.containers[0].image}{" | "}{.spec.template.spec.containers[0].imagePullPolicy}{"\n"}'
-```
-
----
-
-## 6) Verification (the most important part)
-
-### 6.1 Kubernetes health
-
-```bash
-kubectl get deploy,pods,svc,ingress
-kubectl get events --sort-by=.lastTimestamp | tail -n 20
-kubectl rollout status deploy/movie-manager-backend --timeout=2m
-kubectl rollout status deploy/movie-manager-frontend --timeout=2m
-```
-
-### 6.2 External routing (ALB + Ingress)
-
-```bash
-ALB=$(kubectl get ingress movie-manager-ingress -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
-
-# Frontend should be 200
-curl -s -o /dev/null -w "frontend=%{http_code}\n" "http://$ALB/"
-
-# Backend should be 200 and return JSON
-curl -s -o /dev/null -w "api=%{http_code}\n" "http://$ALB/api/movies"
-curl -s "http://$ALB/api/movies" | head -c 200; echo
-```
-
-### 6.3 Frontend build sanity (no localhost in production JS)
-
-Get the JS bundle path and search inside it:
-
-```bash
-JS=$(curl -s "http://$ALB/" | grep -oE 'src="[^"]+\.js"' | head -n 1 | cut -d'"' -f2)
-echo "JS=$JS"
-
-# Should NOT show localhost:5000
-curl -s --compressed "http://$ALB$JS" | grep -Eo 'localhost:5000|http://localhost:5000/api' | head || true
-
-# It IS okay to see "/api"
-curl -s --compressed "http://$ALB$JS" | grep -Eo '"/api"' | head
-```
-
-### 6.4 Check logs quickly (optional but useful)
-
-```bash
-kubectl logs deploy/movie-manager-backend --tail=80
-kubectl logs deploy/movie-manager-frontend --tail=80
-```
-
----
-
-
-## 7) Notes on `:latest` and `imagePullPolicy`
-
-For learning/labs, it’s convenient to use:
-
-- `image: ...:latest`
-- `imagePullPolicy: Always`
-
-Then after pushing a new `:latest`, do:
-
-```bash
-kubectl rollout restart deploy/movie-manager-frontend
-kubectl rollout restart deploy/movie-manager-backend
-```
-
-For real production, prefer **immutable tags** (like the timestamp tags above) to avoid “it works on my cluster” mysteries.
-
----
-
-## 8) Troubleshooting checklist
-
-- **Ingress not getting an address**
-  ```bash
-  kubectl describe ingress movie-manager-ingress
-  kubectl get pods -n kube-system | grep -i load-balancer
-  ```
-
-- **502/504 from ALB**
-  - Check service ports match container ports
-  - Check pods are Ready
-  ```bash
-  kubectl get endpoints movie-manager-backend
-  kubectl describe pod <backend-pod>
-  kubectl logs <backend-pod>
-  ```
-
-- **Frontend loads but API calls fail**
-  - Verify your bundle uses `/api`, not `localhost`
-  - Verify Ingress routes `/api/*` to backend
-  ```bash
-  kubectl get ingress movie-manager-ingress -o yaml | sed -n '1,200p'
-  ```
-
-- **Posters/images not loading**
-  - If poster URLs look like `/images/...`, ensure Ingress also routes `/images/*` to backend.
-
----
-
-## 9) Quick “everything is healthy” command set
-
-```bash
-kubectl get deploy,pods,svc,ingress
-kubectl get events --sort-by=.lastTimestamp | tail -n 15
-
-ALB=$(kubectl get ingress movie-manager-ingress -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
-curl -s -o /dev/null -w "frontend=%{http_code}\n" "http://$ALB/"
-curl -s -o /dev/null -w "api=%{http_code}\n" "http://$ALB/api/movies"
-```
-
-## MongoDB Persistence & Seeding (Production-Ready)
-
-This project uses **MongoDB with persistent storage** backed by **AWS EBS (gp3 via the EBS CSI Driver)**.
-Database seeding is implemented in a **repeatable and declarative** way using a Kubernetes Job.
-
----
-
-### 10.1. MongoDB Persistent Storage (PVC)
-
-MongoDB is deployed with the following constraints:
-
-- **Single replica**
-- **Recreate deployment strategy**
-- **PersistentVolumeClaim mounted at `/data/db`**
-
-This design guarantees:
-- Only one MongoDB process writes to the volume
-- Data survives pod restarts and rescheduling
-- Safe usage of a single EBS volume
-
-#### Apply MongoDB PVC and Deployment
-
-```bash
+# Apply Database & Seeding
 kubectl apply -f k8s/mongo-pvc.yaml
 kubectl apply -f k8s/mongo.yaml
-```
-
-Verify storage and pod state:
-
-```bash
-kubectl get pvc,pv | grep mongo
-kubectl get pods -l app=mongo
-```
-
-Expected:
-- PVC status: `Bound`
-- Mongo pod: `Running`
-
----
-
-### 10.2. MongoDB Seeding (Kubernetes Job)
-
-Instead of manual `kubectl exec` seeding, MongoDB is populated using:
-
-- **ConfigMap** → stores the seed JavaScript
-- **Job** → runs `mongosh`, inserts data, and exits
-
-This makes seeding **repeatable**, **auditable**, and **safe to rerun**.
-
-#### Seed Manifests
-
-- `k8s/mongo-seed-configmap.yaml`
-- `k8s/mongo-seed-job.yaml`
-
-#### Apply Seed Resources
-
-```bash
 kubectl apply -f k8s/mongo-seed-configmap.yaml
 kubectl apply -f k8s/mongo-seed-job.yaml
-```
 
-Check job status and logs:
-
-```bash
-kubectl get jobs
-kubectl logs job/mongo-seed-movies
-```
-
-Expected output:
-
-```
-Seeding Mongo at: mongodb://mongo:27017/movie_manager
-Done.
-```
-
-> The seed script starts with `db.movies.deleteMany({})`,
-> which makes the job **idempotent** and safe to re-run.
-
----
-
-### 10.3. Verify MongoDB Data
-
-Run a temporary Mongo shell pod:
-
-```bash
-kubectl run mongo-check \
-  --rm -it \
-  --image=mongo:7 \
-  --restart=Never -- \
-  mongosh "mongodb://mongo:27017/movie_manager" \
-  --eval "db.movies.countDocuments()"
-```
-
-Expected output:
-
-```
-12
-```
-
-Verify a sample document:
-
-```bash
-kubectl run mongo-check \
-  --rm -it \
-  --image=mongo:7 \
-  --restart=Never -- \
-  mongosh "mongodb://mongo:27017/movie_manager" \
-  --eval "db.movies.findOne()"
+# Apply App
+kubectl apply -f k8s/movie-manager-backend.yaml
+kubectl apply -f k8s/movie-manager-frontend.yaml
+kubectl apply -f k8s/movie-manager-ingress.yaml
 ```
 
 ---
 
-### 10.4. Backend End-to-End Verification (Inside the Cluster)
+## 🧹 Cleanup & Teardown
 
-Verify backend connectivity to MongoDB:
+**IMPORTANT**: Before destroying infrastructure, ensure all Load Balancers are deleted to avoid dangling resources.
 
+Run the safety check script:
 ```bash
-kubectl run curl-test \
-  --rm -it \
-  --image=curlimages/curl:8.8.0 \
-  --restart=Never -- \
-  curl http://movie-manager-backend.default.svc.cluster.local:5000/api/movies
+./pre_destroy_check.sh
 ```
 
-Expected:
-- HTTP 200
-- JSON array with **12 movies**
-
----
-
-### 10.5. MongoDB Restart Safety Check
-
-Restart MongoDB and verify data persistence:
-
-```bash
-kubectl rollout restart deploy/mongo
-kubectl rollout status deploy/mongo
-```
-
-Re-check data:
-
-```bash
-kubectl run mongo-check \
-  --rm -it \
-  --image=mongo:7 \
-  --restart=Never -- \
-  mongosh "mongodb://mongo:27017/movie_manager" \
-  --eval "db.movies.countDocuments()"
-```
-
-Expected:
-
-```
-12
-```
-
-✅ Confirms that PVC-backed storage is working correctly.
-
----
-
-### 10.6. Design Notes & Future Improvements
-
-- MongoDB runs as **single replica** to safely use one PVC
-- For high availability, migrate to:
-  - MongoDB ReplicaSet
-  - StatefulSet
-  - One PVC per replica
-- The seed Job can be:
-  - Re-run manually
-  - Integrated into CI/CD
-  - Converted into a Helm hook
-
----
+If checks pass:
+1. Destroy Monitoring: `terraform destroy` in `infra/monitoring`
+2. Destroy EKS/Jenkins: `terraform destroy` in `infra/eks`

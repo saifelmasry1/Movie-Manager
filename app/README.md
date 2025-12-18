@@ -1,117 +1,99 @@
-# Movie Manager
+# Movie Manager - Application Details
 
-A simple, read-only Movie Manager application built for a DevOps graduation project.
-This project demonstrates a full-stack application using React, Node.js, Express, and MongoDB, fully containerized with Docker.
+This directory contains the source code for the Movie Manager application, a simple MERN-stack inspire app (MongoDB, Express, React, Node) designed for DevOps demonstration purposes.
 
-## Features
-
-- **Read-Only Interface**: View a curated list of 9 movies.
-- **Movie Details**: Displays title, year, genre, rating, description, and poster.
-- **Simple Architecture**: Clean separation of concerns (Frontend, Backend, Database).
-- **Containerized**: Runs easily with Docker Compose.
-
-## Folder Structure
+## Component Overview
 
 ```
-/
-├── backend/            # Node.js + Express API
-│   ├── src/
-│   │   ├── config/     # Database configuration
-│   │   ├── models/     # Mongoose models
-│   │   ├── routes/     # API routes
-│   │   ├── seed/       # Database seeding script
-│   │   └── index.js    # Server entry point
-│   ├── Dockerfile
-│   └── package.json
-│
-├── frontend/           # React + Vite UI
-│   ├── src/
-│   │   ├── components/ # Reusable components
-│   │   ├── config/     # API configuration
-│   │   ├── pages/      # Page components
-│   │   └── main.jsx    # App entry point
-│   ├── Dockerfile
-│   └── package.json
-│
-└── docker-compose.yml  # Orchestration for all services
+┌─────────────────────────────────────────────────────────────────────────┐
+│                        Movie Manager Application                         │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│    ┌─────────────────────────────────────────────────────────────────┐  │
+│    │                        FRONTEND (React)                         │  │
+│    │                                                                 │  │
+│    │   ┌─────────────┐    ┌─────────────┐    ┌─────────────────┐    │  │
+│    │   │  MoviesPage │    │ DetailsPage │    │   Components    │    │  │
+│    │   │  (Grid)     │    │ (Single)    │    │   (Header,Card) │    │  │
+│    │   └──────┬──────┘    └──────┬──────┘    └─────────────────┘    │  │
+│    │          │                  │                                   │  │
+│    │          └────────┬─────────┘                                   │  │
+│    │                   ▼                                             │  │
+│    │          axios.get("/api/movies")                               │  │
+│    └───────────────────┬─────────────────────────────────────────────┘  │
+│                        │ HTTP Request                                   │
+│                        ▼                                                │
+│    ┌─────────────────────────────────────────────────────────────────┐  │
+│    │                     BACKEND (Node.js + Express)                 │  │
+│    │                                                                 │  │
+│    │   ┌──────────────────────────────────────────────────────────┐  │  │
+│    │   │  Routes:                                                 │  │  │
+│    │   │    GET /api/movies      → List all movies (JSON)        │  │  │
+│    │   │    GET /api/movies/:id  → Get single movie              │  │  │
+│    │   │    GET /health          → Health check                  │  │  │
+│    │   └──────────────────────────────────────────────────────────┘  │  │
+│    │                        │                                        │  │
+│    │                        │ mongoose.find()                        │  │
+│    │                        ▼                                        │  │
+│    └───────────────────────────────────────────────────────────────────┘  │
+│                        │                                                │
+│                        ▼                                                │
+│    ┌─────────────────────────────────────────────────────────────────┐  │
+│    │                      DATABASE (MongoDB)                         │  │
+│    │                                                                 │  │
+│    │   Collection: movies                                            │  │
+│    │   ┌──────────────────────────────────────────────────────────┐  │  │
+│    │   │  { title, year, genre, rating, posterUrl, description } │  │  │
+│    │   └──────────────────────────────────────────────────────────┘  │  │
+│    │                                                                 │  │
+│    │   Pre-seeded with 12 movies (via seedMovies.js)                │  │
+│    └─────────────────────────────────────────────────────────────────┘  │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
 ```
 
-## Prerequisites
+### 1. Frontend (`/frontend`)
+- **Tech**: React.js, Vite.
+- **Port**: 3000 (Container), 5173 (Dev).
+- **Features**:
+  - Displays list of movies.
+  - Responsive Grid Layout.
+  - Fetches data from Backend API.
+- **Configuration**:
+  - `VITE_API_BASE_URL`: Environment variable to point to the backend service.
 
-- Node.js (v18 or higher)
-- MongoDB (for local development)
-- Docker & Docker Compose
+### 2. Backend (`/backend`)
+- **Tech**: Node.js, Express.
+- **Port**: 5000.
+- **Features**:
+  - REST API (`GET /api/movies`, `GET /api/movies/:id`).
+  - Read-Only access to data.
+  - Health check endpoint (`/health`).
+- **Database Connection**:
+  - Uses `mongoose` to connect to MongoDB.
+  - `MONGODB_URI` environment variable.
 
-## Getting Started
+### 3. Database
+- **Tech**: MongoDB.
+- **Seeding**: The app includes a seeding script (`src/seed/seedMovies.js`) to populate the database with initial data.
 
-### Option 1: Running with Docker (Recommended)
+---
 
-1. **Build and start the containers:**
-   ```bash
-   docker compose up --build
-   ```
+## Local Development (Docker Compose)
 
-2. **Seed the database (Run this in a separate terminal while containers are running):**
-   ```bash
-   docker compose exec backend npm run seed
-   ```
-   *Note: This populates the database with the 9 initial movies.*
+The easiest way to run the full stack locally is using Docker Compose.
 
-3. **Access the application:**
-   - Frontend: [http://localhost:3000](http://localhost:3000)
-   - Backend API: [http://localhost:5000/api/movies](http://localhost:5000/api/movies)
-   - Health Check: [http://localhost:5000/health](http://localhost:5000/health)
+### Start Application
+```bash
+docker compose up --build
+```
 
-4. **Stop the application:**
-   ```bash
-   docker compose down
-   ```
+### Seed Data
+Once running, open a new terminal:
+```bash
+docker compose exec backend npm run seed
+```
 
-### Option 2: Running Locally
-
-**1. Backend Setup:**
-
-1. Navigate to the backend directory:
-   ```bash
-   cd backend
-   ```
-2. Install dependencies:
-   ```bash
-   npm install
-   ```
-3. Create a `.env` file (optional, defaults provided in code):
-   ```
-   MONGODB_URI=mongodb://localhost:27017/movie_manager
-   PORT=5000
-   ```
-4. Start MongoDB locally.
-5. Seed the database:
-   ```bash
-   npm run seed
-   ```
-6. Start the server:
-   ```bash
-   npm run dev
-   ```
-
-**2. Frontend Setup:**
-
-1. Navigate to the frontend directory:
-   ```bash
-   cd frontend
-   ```
-2. Install dependencies:
-   ```bash
-   npm install
-   ```
-3. Start the development server:
-   ```bash
-   npm run dev
-   ```
-4. Open [http://localhost:5173](http://localhost:5173) (or the port shown in your terminal).
-
-## API Endpoints
-
-- `GET /health`: Check server status.
-- `GET /api/movies`: Retrieve all movies.
-- `GET /api/movies/:id`: Retrieve a specific movie by ID.
+### Access
+- **UI**: http://localhost:3000
+- **API**: http://localhost:5000

@@ -1,319 +1,128 @@
-# EKS Cluster – AWS Load Balancer Controller Setup
+# EKS Cluster & Jenkins Infrastructure
 
-This document describes how to start using the EKS cluster **after** `terraform apply` has finished and the cluster is up and running.
+This directory uses **Terraform** to provision the core infrastructure for the project:
 
-You will:
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                      terraform apply (infra/eks)                            │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│   Creates the following AWS Resources:                                      │
+│                                                                             │
+│   ┌───────────────────────────────────────────────────────────────────┐    │
+│   │                         VPC (10.0.0.0/16)                         │    │
+│   │                                                                   │    │
+│   │  ┌─────────────────────┐      ┌─────────────────────────────┐   │    │
+│   │  │   Public Subnets    │      │     Private Subnets         │   │    │
+│   │  │   10.0.1.0/24       │      │     10.0.101.0/24           │   │    │
+│   │  │   10.0.2.0/24       │      │     10.0.102.0/24           │   │    │
+│   │  │                     │      │                             │   │    │
+│   │  │  ┌───────────────┐  │      │  ┌───────────────────────┐  │   │    │
+│   │  │  │   Jenkins     │  │      │  │    EKS Node Group     │  │   │    │
+│   │  │  │   EC2         │  │      │  │    (t3.medium x2)     │  │   │    │
+│   │  │  │   t3.medium   │  │      │  │                       │  │   │    │
+│   │  │  └───────────────┘  │      │  └───────────────────────┘  │   │    │
+│   │  └─────────────────────┘      └─────────────────────────────┘   │    │
+│   │                                                                   │    │
+│   │  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐  │    │
+│   │  │ Internet Gateway│  │   NAT Gateway   │  │   Route Tables  │  │    │
+│   │  └─────────────────┘  └─────────────────┘  └─────────────────┘  │    │
+│   └───────────────────────────────────────────────────────────────────┘    │
+│                                                                             │
+│   ┌───────────────────────────────────────────────────────────────────┐    │
+│   │                      EKS Cluster (depi-eks)                       │    │
+│   │                                                                   │    │
+│   │   - Control Plane (AWS Managed)                                   │    │
+│   │   - OIDC Provider (for IRSA)                                      │    │
+│   │   - Node Group (2 nodes, min:1, max:3)                           │    │
+│   └───────────────────────────────────────────────────────────────────┘    │
+│                                                                             │
+│   ┌───────────────────────────────────────────────────────────────────┐    │
+│   │                         IAM Resources                             │    │
+│   │                                                                   │    │
+│   │   - EKS Cluster Role           - Jenkins EC2 Instance Profile    │    │
+│   │   - EKS Node Role              - Jenkins IAM Role (ECR, EKS)     │    │
+│   │   - Security Groups            - aws-lbc-policy (for LBC)        │    │
+│   └───────────────────────────────────────────────────────────────────┘    │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
 
-1. Configure `kubectl` access to the EKS cluster.
-2. Install and configure the AWS Load Balancer Controller (ALB controller).
-3. Optionally deploy a sample NGINX application behind an Application Load Balancer using `../addons/aws-lbc-cli.sh`.
+Outputs:
+  → jenkins_url        = http://<PUBLIC_IP>:8080
+  → jenkins_ssh_hint   = ssh -i ~/.ssh/key.pem ubuntu@<IP>
+  → eks_cluster_name   = depi-eks
+  → vpc_id             = vpc-xxxxxxxxx
+```
 
----
+**Components Created:**
+1.  **Amazon EKS Cluster** (`depi-eks`): A managed Kubernetes cluster.
+2.  **Jenkins Server**: An EC2 instance pre-installed with Jenkins for CI/CD.
+3.  **Networking**: VPC, Subnets (Public/Private), Internet Gateway, NAT Gateway.
+4.  **IAM Roles**: Necessary roles for EKS, Nodes, and Jenkins.
 
 ## 1. Prerequisites
 
-Make sure the following tools are installed on the machine you are using to manage the cluster:
+- **AWS CLI v2**: Configured with valid credentials (`aws sts get-caller-identity`).
+- **Terraform**: v1.0+.
+- **SSH Key Pair**: You need an EC2 KeyPair (default: `azza`) in `us-east-1` for the Jenkins instance.
+  - *If you use a different key name, update `terraform.tfvars`.*
 
-- [AWS CLI](https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html)
-- `kubectl`
-- `eksctl`
-- `helm` (v3+)
-- `bash`
+## 2. Provisioning Infrastructure
 
-AWS CLI must be configured with credentials that have permissions to manage:
-
-- EKS
-- IAM
-- EC2
-- CloudFormation
-
-Example (check the active identity):
+Run the following from this directory (`infra/eks`):
 
 ```bash
-aws sts get-caller-identity
+# Initialize Terraform
+terraform init
+
+# Validate configuration
+terraform validate
+
+# Plan deployment
+terraform plan -out tfplan
+
+# Apply deployment
+terraform apply tfplan
 ```
 
-## 2. Assumptions and Terraform Outputs
+### Important Outputs
+After a successful apply, Terraform will output:
+- `jenkins_url`: The HTTP URL to access your Jenkins server (e.g., `http://X.X.X.X:8080`).
+- `jenkins_ssh_hint`: The SSH command to access the Jenkins server.
+- `eks_cluster_name`: The name of the created cluster (e.g., `depi-eks`).
+- `vpc_id`: The ID of the created VPC.
 
-We assume that `terraform apply` has already created:
+## 3. Post-Provisioning Steps
 
-- An EKS cluster (for example): `depi-eks`
-- A VPC for the cluster (for example): `vpc-0bd776ab3b50e7f53`
-- Public and private subnets
-- A managed node group for the cluster
-
-Typical Terraform outputs used later:
-
-- `eks_cluster_name`
-- `vpc_id`
-- (optionally) `public_subnet_ids`, `private_subnet_ids`
-
-You can adapt the example commands in this README to your own cluster name and VPC ID.
-
-## 3. Configure kubectl for the EKS Cluster
-
-Use the AWS CLI to update your local kubeconfig and add the EKS cluster context.
-
-Example:
+### 3.1 Configure Local `kubectl`
+Connect your local `kubectl` to the new cluster:
 
 ```bash
-aws eks update-kubeconfig \
-  --name depi-eks \
-  --region us-east-1
+aws eks update-kubeconfig --region us-east-1 --name <CLUSTER_NAME>
 ```
 
-Verify that you can communicate with the cluster:
-
-```bash
-kubectl get nodes
-```
-
-You should see your worker nodes in `Ready` state.
-
-Also verify core system pods:
-
-```bash
-kubectl get pods -A
-```
-
-You should see pods such as:
-
-- `coredns`
-- `kube-proxy`
-- `aws-node`
-
-All (or most) should be in `Running` state.
-
-## 4. AWS Load Balancer Controller Installation (via ../addons/aws-lbc-cli.sh)
-
-The script `../addons/aws-lbc-cli.sh` automates the setup of the AWS Load Balancer Controller for EKS. It performs the following:
-
-- Associates an IAM OIDC provider with the EKS cluster (IRSA).
-- Ensures an IAM policy for the controller exists (using `../addons/iam-policy.json` or the official policy).
-- Creates or updates an IAM ServiceAccount in `kube-system`.
-- Installs or upgrades the AWS Load Balancer Controller Helm chart.
-- Ensures an IngressClass named `alb` exists.
-- Optionally deploys a sample NGINX application + Service + Ingress behind an ALB and prints its DNS.
-
-### 4.1. Make the script executable
-
-From the repo root (or wherever the script is placed):
-
-```bash
-chmod +x ../addons/aws-lbc-cli.sh
-```
-
-### 4.2. Basic usage (with defaults)
-
-If the script has default values like:
-
-- `CLUSTER_NAME="depi-eks"`
-- `REGION="us-east-1"`
-- `VPC_ID="vpc-0bd776ab3b50e7f53"`
-
-you can simply run:
-
-```bash
-./../addons/aws-lbc-cli.sh --with-sample
-```
-
-or:
-
-```bash
-./../addons/aws-lbc-cli.sh --no-sample
-```
-
-### 4.3. CLI arguments
-
-The script supports several arguments:
-
-- `--cluster NAME`: EKS cluster name (e.g. `depi-eks`)
-- `--region REGION`: AWS region (e.g. `us-east-1`)
-- `--vpc-id VPC_ID`: VPC ID where ALBs should be created (e.g. `vpc-0bd776ab3b50e7f53`)
-- `--namespace NAME`: Namespace for the controller (default: `kube-system`)
-- `--policy-name NAME`: IAM policy name (default: `AWSLoadBalancerControllerIAMPolicy`)
-- `--iam-sa-name NAME`: ServiceAccount name (default: `aws-load-balancer-controller`)
-- `--with-sample`: Deploys a sample NGINX app + Service + Ingress and prints ALB DNS.
-- `--no-sample`: Installs the controller only (no sample app).
-- `-h, --help`: Prints usage.
-
-**Example 1 – Install controller + sample app**
-
-```bash
-./../addons/aws-lbc-cli.sh \
-  --cluster depi-eks \
-  --region us-east-1 \
-  --vpc-id vpc-0bd776ab3b50e7f53 \
-  --with-sample
-```
-
-**Example 2 – Install controller only (no sample app)**
-
-```bash
-./../addons/aws-lbc-cli.sh \
-  --cluster depi-eks \
-  --region us-east-1 \
-  --vpc-id vpc-0bd776ab3b50e7f53 \
-  --no-sample
-```
-
-## 5. What the script does (high level)
-
-When you run `../addons/aws-lbc-cli.sh`, it performs:
-
-**OIDC Association**
-
-```bash
-eksctl utils associate-iam-oidc-provider \
-  --region <REGION> \
-  --cluster <CLUSTER_NAME> \
-  --approve
-```
-
-**IAM Policy**
-
-- Checks if an IAM policy named (e.g.) `AWSLoadBalancerControllerIAMPolicy` already exists.
-- If not, it creates it using `../addons/iam-policy.json` (either from the repo or downloaded from the official AWS Load Balancer Controller documentation).
-- If it exists, it reuses the existing policy ARN.
-
-**IAM ServiceAccount**
-
-Creates or updates a ServiceAccount in `kube-system` with an attached IAM role using IRSA:
-
-```bash
-eksctl create iamserviceaccount \
-  --cluster <CLUSTER_NAME> \
-  --namespace <NAMESPACE> \
-  --name <IAMSA_NAME> \
-  --attach-policy-arn arn:aws:iam::<ACCOUNT_ID>:policy/<POLICY_NAME> \
-  --override-existing-serviceaccounts \
-  --region <REGION> \
-  --approve
-```
-
-**AWS Load Balancer Controller Helm chart**
-
-Installs or upgrades the Helm release:
-
-```bash
-helm upgrade --install aws-load-balancer-controller eks/aws-load-balancer-controller \
-  -n <NAMESPACE> \
-  --set clusterName=<CLUSTER_NAME> \
-  --set serviceAccount.create=false \
-  --set serviceAccount.name=<IAMSA_NAME> \
-  --set region=<REGION> \
-  --set vpcId=<VPC_ID>
-```
-
-**IngressClass alb**
-
-Ensures that an IngressClass named `alb` exists with controller `ingress.k8s.aws/alb`.
-
-**Sample NGINX app (if `--with-sample` is used)**
-
-- Deploys a small NGINX Deployment + Service + Ingress in the default namespace.
-- Waits for the ALB DNS to be assigned to the Ingress.
-- Prints an HTTP URL that you can open in the browser to verify end-to-end traffic.
-
-## 6. Verifying the AWS Load Balancer Controller
-
-After running the script, verify that the controller is running:
-
-```bash
-kubectl get deploy aws-load-balancer-controller -n kube-system
-kubectl get pods -n kube-system | grep aws-load-balancer-controller
-```
-
-You should see replicas in `Running` state.
-
-## 7. Verifying the sample NGINX application (if `--with-sample`)
-
-If you used `--with-sample`, the script will:
-
-1. Deploy Deployment, Service, and Ingress named `my-nginx` in the default namespace.
-2. Wait until the Ingress has an external hostname (the ALB DNS).
-3. Print something like:
-
-```text
-[DONE] Sample nginx is exposed via AWS ALB.
-[INFO] Try opening this URL in your browser:
-       http://k8s-default-mynginx-xxxxxxxxxx.us-east-1.elb.amazonaws.com
-```
-
-You can also check manually:
-
-```bash
-kubectl get ingress my-nginx -n default
-```
-
-You should see a non-empty `ADDRESS` field (the ALB DNS name).
-
-Open the printed URL in a browser. You should see the default NGINX welcome page.
-
-## 8. Deploying your own application behind the ALB
-
-Once the AWS Load Balancer Controller is installed, you can deploy your own applications using Kubernetes Ingress objects.
-
-High-level requirements:
-
-- Deployment for your app (pods).
-- Service (usually ClusterIP) exposing the pods on a port (e.g. 80).
-- Ingress with:
-    - `spec.ingressClassName: alb`
-    - Proper annotations for ALB behavior.
-    - Backend pointing to your Service/port.
-
-Example Ingress snippet:
-
-```yaml
-apiVersion: networking.k8s.io/v1
-kind: Ingress
-metadata:
-  name: my-app
-  namespace: default
-  annotations:
-    alb.ingress.kubernetes.io/scheme: internet-facing
-    alb.ingress.kubernetes.io/target-type: ip
-spec:
-  ingressClassName: alb
-  rules:
-    - http:
-        paths:
-          - path: /
-            pathType: Prefix
-            backend:
-              service:
-                name: my-app-service
-                port:
-                  number: 80
-```
-
-Apply your manifests:
-
-```bash
-kubectl apply -f my-app-deployment.yaml
-kubectl apply -f my-app-service.yaml
-kubectl apply -f my-app-ingress.yaml
-```
-
-Then:
-
-```bash
-kubectl get ingress my-app -n default
-```
-
-Use the `ADDRESS`/hostname to access your application via the AWS Application Load Balancer.
-
-## 9. Cleaning up the sample (optional)
-
-If you used `--with-sample` and want to remove the sample NGINX application later:
-
-```bash
-kubectl delete ingress my-nginx -n default
-kubectl delete service my-nginx -n default
-kubectl delete deployment my-nginx -n default
-```
-
-This does not remove the AWS Load Balancer Controller itself; only the sample app.
-
-With these steps, you can go from “Terraform cluster is up” to “applications running behind an AWS Application Load Balancer on EKS” using a single automated script and standard Kubernetes manifests.
+### 3.2 Install AWS Load Balancer Controller (LBC)
+The project includes a helper script to automate the installation of the AWS Load Balancer Controller. This is **required** for Ingress to work.
+
+1.  Navigate to the addons directory:
+    ```bash
+    cd ../addons
+    chmod +x aws-lbc-cli.sh
+    ```
+
+2.  Run the installation script:
+    ```bash
+    # This installs the LBC, creates IAM policies, and ServiceAccounts
+    ./aws-lbc-cli.sh --no-sample
+    ```
+
+3.  Verify installation:
+    ```bash
+    kubectl get pods -n kube-system -l app.kubernetes.io/name=aws-load-balancer-controller
+    ```
+
+## 4. Architecture Notes
+
+- **Jenkins Access**: The Jenkins Security Group allows access to port `8080` (Web UI) and `22` (SSH). By default, it is open to `0.0.0.0/0`, but you can restrict this via variables.
+- **EKS Access**: The Jenkins IAM role is granted permission to access the EKS cluster to perform deployments (`kubectl`, `helm`).
+- **State Files**: Terraform state is stored locally by default. For production, configure a remote backend (S3/DynamoDB).
