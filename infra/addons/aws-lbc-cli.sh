@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -Eeuo pipefail
+
+trap 'rc=$?; echo "❌ فشل عند السطر $LINENO: $BASH_COMMAND (exit=$rc)" >&2' ERR
 
 ########################################
 # User-configurable variables (Defaults)
@@ -8,11 +10,15 @@ set -euo pipefail
 
 CLUSTER_NAME="depi-eks"
 REGION="us-east-1"
-VPC_ID=""              # Will be auto-detected from terraform output if empty
+VPC_ID=""              # Will be auto-detected from AWS EKS (preferred), then terraform output if empty
 POLICY_NAME="AWSLoadBalancerControllerIAMPolicy"
 IAMSA_NAME="aws-load-balancer-controller"
 NAMESPACE="kube-system"
 DEPLOY_SAMPLE_NGINX="true"
+
+# Chart settings (offline install via curl -> tgz)
+CHART_VERSION="1.16.0"   # override via --chart-version
+CHART_BASE_URL="https://aws.github.io/eks-charts"
 
 ########################################
 # Function: Print usage and exit
@@ -23,13 +29,14 @@ usage() {
   echo "Deploys and configures the AWS Load Balancer Controller for EKS."
   echo ""
   echo "Options:"
-  echo "  --cluster NAME      EKS cluster name (Default: ${CLUSTER_NAME})"
-  echo "  --region REGION     AWS region (Default: ${REGION})"
-  echo "  --vpc-id VPC_ID     VPC ID where ALBs will be created"
-  echo "  --namespace NAME    Namespace for the controller (Default: ${NAMESPACE})"
-  echo "  --with-sample       Deploy a sample NGINX app (Default)"
-  echo "  --no-sample         Install controller only (no sample app)"
-  echo "  -h, --help          Print this help message."
+  echo "  --cluster NAME         EKS cluster name (Default: ${CLUSTER_NAME})"
+  echo "  --region REGION        AWS region (Default: ${REGION})"
+  echo "  --vpc-id VPC_ID        VPC ID where ALBs will be created"
+  echo "  --namespace NAME       Namespace for the controller (Default: ${NAMESPACE})"
+  echo "  --chart-version VER    Helm chart version (Default: ${CHART_VERSION})"
+  echo "  --with-sample          Deploy a sample NGINX app (Default)"
+  echo "  --no-sample            Install controller only (no sample app)"
+  echo "  -h, --help             Print this help message."
   exit 1
 }
 
@@ -54,6 +61,10 @@ while [[ $# -gt 0 ]]; do
       NAMESPACE="$2"
       shift 2
       ;;
+    --chart-version)
+      CHART_VERSION="$2"
+      shift 2
+      ;;
     --with-sample)
       DEPLOY_SAMPLE_NGINX="true"
       shift
@@ -73,9 +84,31 @@ while [[ $# -gt 0 ]]; do
 done
 
 ########################################
-# Try to auto-detect VPC_ID from terraform output if empty
+# Check required CLIs
 ########################################
-if [ -z "${VPC_ID}" ]; then
+for cmd in aws kubectl eksctl helm curl; do
+  if ! command -v "$cmd" >/dev/null 2>&1; then
+    echo "[ERROR] '$cmd' is not installed or not in PATH. Please install it first."
+    exit 1
+  fi
+done
+
+########################################
+# Try to auto-detect VPC_ID if empty
+# Preferred: AWS EKS describe-cluster
+# Fallback: terraform output (vpc_id)
+########################################
+if [[ -z "${VPC_ID}" ]]; then
+  VPC_ID="$(aws eks describe-cluster --name "${CLUSTER_NAME}" --region "${REGION}" \
+    --query 'cluster.resourcesVpcConfig.vpcId' --output text 2>/dev/null || true)"
+  if [[ -n "${VPC_ID}" && "${VPC_ID}" != "None" ]]; then
+    echo "[INFO] Auto-detected VPC ID from EKS: ${VPC_ID}"
+  else
+    VPC_ID=""
+  fi
+fi
+
+if [[ -z "${VPC_ID}" ]]; then
   if command -v terraform >/dev/null 2>&1; then
     if terraform output -raw vpc_id >/dev/null 2>&1; then
       VPC_ID="$(terraform output -raw vpc_id)"
@@ -84,9 +117,15 @@ if [ -z "${VPC_ID}" ]; then
   fi
 fi
 
-if [ -z "${VPC_ID}" ]; then
-  echo "[ERROR] The VPC ID must be specified using --vpc-id or available as 'vpc_id' terraform output in this directory."
+# Validate VPC_ID
+if [[ -z "${VPC_ID}" ]]; then
+  echo "[ERROR] The VPC ID must be specified using --vpc-id or discoverable from EKS/terraform."
   usage
+fi
+
+if [[ ! "${VPC_ID}" =~ ^vpc-[0-9a-f]+$ ]]; then
+  echo "[ERROR] Invalid VPC_ID='${VPC_ID}' (expected vpc-xxxxxxxxxxxxxxxxx)"
+  exit 1
 fi
 
 ########################################
@@ -99,19 +138,10 @@ echo "[CONFIG] VPC ID:            ${VPC_ID}"
 echo "[CONFIG] Namespace:         ${NAMESPACE}"
 echo "[CONFIG] Policy name:       ${POLICY_NAME}"
 echo "[CONFIG] IAM ServiceAccount ${IAMSA_NAME}"
+echo "[CONFIG] Chart version:     ${CHART_VERSION}"
 echo "[CONFIG] Deploy sample app: ${DEPLOY_SAMPLE_NGINX}"
 echo "=============================================="
 echo ""
-
-########################################
-# Check required CLIs
-########################################
-for cmd in aws kubectl eksctl helm; do
-  if ! command -v "$cmd" >/dev/null 2>&1; then
-    echo "[ERROR] '$cmd' is not installed or not in PATH. Please install it first."
-    exit 1
-  fi
-done
 
 ########################################
 # Get AWS Account ID
@@ -139,9 +169,10 @@ echo ""
 echo "[STEP 2] Ensuring IAM policy '${POLICY_NAME}' exists..."
 
 # Download iam-policy.json from official repo if not present locally
-if [ ! -f iam-policy.json ]; then
+if [[ ! -f iam-policy.json ]]; then
   echo "[INFO] Downloading iam-policy.json from official AWS Load Balancer Controller repo..."
-  curl -sS -o iam-policy.json \
+  curl -fsSL --retry 5 --retry-all-errors --connect-timeout 10 --max-time 120 \
+    -o iam-policy.json \
     https://raw.githubusercontent.com/kubernetes-sigs/aws-load-balancer-controller/main/docs/install/iam_policy.json
 fi
 
@@ -229,28 +260,32 @@ echo "[STEP 3] IAM service account is ready."
 echo ""
 
 ########################################
-# Step 4: Install/Upgrade AWS Load Balancer Controller via Helm
+# Step 4: Install/Upgrade AWS Load Balancer Controller via Helm (OFFLINE via curl tgz)
 ########################################
-echo "[STEP 4] Installing/Upgrading AWS Load Balancer Controller via Helm..."
+echo "[STEP 4] Installing/Upgrading AWS Load Balancer Controller via Helm (offline tgz)..."
 
-helm repo add eks https://aws.github.io/eks-charts >/dev/null 2>&1 || true
-helm repo update >/dev/null 2>&1 || true
+CHART_TGZ="/tmp/aws-load-balancer-controller-${CHART_VERSION}.tgz"
+CHART_URL="${CHART_BASE_URL}/aws-load-balancer-controller-${CHART_VERSION}.tgz"
 
-helm upgrade --install aws-load-balancer-controller eks/aws-load-balancer-controller \
+echo "[INFO] Downloading chart: ${CHART_URL}"
+curl -fSL --retry 5 --retry-all-errors --connect-timeout 10 --max-time 180 \
+  -o "${CHART_TGZ}" "${CHART_URL}"
+
+if [[ ! -s "${CHART_TGZ}" ]]; then
+  echo "[ERROR] Chart download failed or empty file: ${CHART_TGZ}"
+  exit 1
+fi
+
+helm upgrade --install aws-load-balancer-controller "${CHART_TGZ}" \
   -n "${NAMESPACE}" \
   --set clusterName="${CLUSTER_NAME}" \
   --set serviceAccount.create=false \
   --set serviceAccount.name="${IAMSA_NAME}" \
   --set region="${REGION}" \
-  --set vpcId="${VPC_ID}"
+  --set vpcId="${VPC_ID}" \
+  --wait --timeout 10m
 
 echo "[STEP 4] Helm release 'aws-load-balancer-controller' installed/upgraded."
-echo "[INFO] Waiting for aws-load-balancer-controller deployment to be ready..."
-kubectl rollout status deployment/aws-load-balancer-controller \
-  -n "${NAMESPACE}" \
-  --timeout=180s || {
-    echo "[WARN] Controller deployment did not become ready within timeout. Please check logs."
-  }
 echo ""
 
 ########################################
@@ -281,7 +316,6 @@ echo ""
 if [[ "${DEPLOY_SAMPLE_NGINX}" == "true" ]]; then
   echo "[STEP 6] Deploying sample nginx app + Service + Ingress..."
 
-  # Apply nginx Deployment, Service, and Ingress in the default namespace
   kubectl apply -f - <<'EOF'
 apiVersion: apps/v1
 kind: Deployment
@@ -303,7 +337,6 @@ spec:
           image: nginx:stable
           ports:
             - containerPort: 80
-
 ---
 apiVersion: v1
 kind: Service
@@ -318,7 +351,6 @@ spec:
       targetPort: 80
       protocol: TCP
   type: ClusterIP
-
 ---
 apiVersion: networking.k8s.io/v1
 kind: Ingress
@@ -344,7 +376,6 @@ EOF
 
   echo "[STEP 6] Sample nginx resources created. Waiting for ALB DNS..."
 
-  # Wait for Ingress hostname (ALB DNS) to be assigned
   HOSTNAME=""
   for i in {1..30}; do
     HOSTNAME=$(kubectl get ingress my-nginx -n default -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true)
@@ -374,6 +405,3 @@ fi
 echo "=============================================="
 echo "[ALL DONE] AWS Load Balancer Controller setup complete."
 echo "=============================================="
-
-
-
