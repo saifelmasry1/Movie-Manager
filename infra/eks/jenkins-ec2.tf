@@ -140,38 +140,38 @@ data "aws_iam_policy_document" "jenkins_inline" {
 
   # Needed for: eksctl IRSA + OIDC provider + policy creation (aws-lbc-cli.sh)
   statement {
-  sid = "IAMForEksctlAndTerraform"
-  actions = [
-    "iam:CreateOpenIDConnectProvider",
-    "iam:GetOpenIDConnectProvider",
-    "iam:ListOpenIDConnectProviders",
-    "iam:TagOpenIDConnectProvider",
-    "iam:UpdateOpenIDConnectProviderThumbprint",
+    sid = "IAMForEksctlAndTerraform"
+    actions = [
+      "iam:CreateOpenIDConnectProvider",
+      "iam:GetOpenIDConnectProvider",
+      "iam:ListOpenIDConnectProviders",
+      "iam:TagOpenIDConnectProvider",
+      "iam:UpdateOpenIDConnectProviderThumbprint",
 
-    "iam:CreatePolicy",
-    "iam:GetPolicy",
-    "iam:ListPolicies",
-    "iam:DeletePolicy",
-    "iam:ListInstanceProfilesForRole",
-    "iam:RemoveRoleFromInstanceProfile",
-    "iam:CreateRole",
-    "iam:GetRole",
-    "iam:DeleteRole",
-    "iam:TagRole",
-    "iam:UntagRole",
-    "iam:AttachRolePolicy",
-    "iam:DetachRolePolicy",
-    "iam:PutRolePolicy",
-    "iam:DeleteRolePolicy",
-    "iam:PassRole",
+      "iam:CreatePolicy",
+      "iam:GetPolicy",
+      "iam:ListPolicies",
+      "iam:DeletePolicy",
+      "iam:ListInstanceProfilesForRole",
+      "iam:RemoveRoleFromInstanceProfile",
+      "iam:CreateRole",
+      "iam:GetRole",
+      "iam:DeleteRole",
+      "iam:TagRole",
+      "iam:UntagRole",
+      "iam:AttachRolePolicy",
+      "iam:DetachRolePolicy",
+      "iam:PutRolePolicy",
+      "iam:DeleteRolePolicy",
+      "iam:PassRole",
 
-    # ✅ لازم لتيرافورم بعد CreateRole
-    "iam:ListRolePolicies",
-    "iam:GetRolePolicy",
-    "iam:ListAttachedRolePolicies",
-  ]
-  resources = ["*"]
-}
+      # ✅ لازم لتيرافورم بعد CreateRole
+      "iam:ListRolePolicies",
+      "iam:GetRolePolicy",
+      "iam:ListAttachedRolePolicies",
+    ]
+    resources = ["*"]
+  }
 
 
   # Needed for: eksctl create iamserviceaccount (it uses CloudFormation stacks)
