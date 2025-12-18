@@ -60,4 +60,4 @@ keys/*.pem
 keys/*.pem
 # private keys
 *.pem
-keys/*.pem
+keys/*.peminfra/eks/terraform.tfvars
