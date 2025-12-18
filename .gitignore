@@ -50,3 +50,14 @@ azza.pub
 *.pem
 *.pub
 
+
+# private keys
+*.pem
+keys/*.pem
+
+# private keys
+*.pem
+keys/*.pem
+# private keys
+*.pem
+keys/*.pem
