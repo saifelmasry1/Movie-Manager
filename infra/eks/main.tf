@@ -161,12 +161,17 @@ resource "aws_eks_cluster" "eks" {
     endpoint_public_access  = true
   }
 
+  # ✅ Keep eksctl's OIDC tag to prevent drift (safe: metadata only)
+  tags = {
+    "alpha.eksctl.io/cluster-oidc-enabled" = "true"
+  }
+
   depends_on = [
     aws_iam_role_policy_attachment.eks_cluster_policy
   ]
 }
-
 ####################################################
+
 
 # EKS Node Group (Private Subnets)
 ####################################################
