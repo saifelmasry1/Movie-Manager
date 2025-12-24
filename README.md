@@ -161,6 +161,13 @@ docker compose up --build
 - Backend: [http://localhost:5000/api/movies](http://localhost:5000/api/movies)
 - MongoDB: `mongodb://localhost:27018/movie_manager`
 
+If you change frontend API envs (like `VITE_API_BASE_URL`), rebuild without cache:
+```bash
+cd app
+docker compose build --no-cache frontend
+docker compose up -d --force-recreate frontend
+```
+
 To seed the database locally:
 ```bash
 docker compose exec backend npm run seed
