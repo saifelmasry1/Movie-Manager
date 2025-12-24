@@ -1,0 +1,40 @@
+---
+- name: "APP | diff manifests (detect drift)"
+  tags: [app_apply]
+  ansible.builtin.shell: |
+    set +e
+    export KUBECONFIG="${KUBECONFIG:-$HOME/.kube/config}"
+
+    kubectl -n "{{ namespace_default }}" diff -f "{{ repo_root }}/k8s/" >/dev/null 2>&1
+    echo "DIFF_RC=$?"
+  args:
+    executable: /bin/bash
+  register: app_diff
+  changed_when: false
+
+- name: "APP | apply manifests (only if diff found)"
+  tags: [app_apply]
+  when: app_diff.stdout is search("DIFF_RC=1")
+  ansible.builtin.shell: |
+    set -euo pipefail
+    export KUBECONFIG="${KUBECONFIG:-$HOME/.kube/config}"
+
+    kubectl -n "{{ namespace_default }}" apply -f "{{ repo_root }}/k8s/"
+  args:
+    executable: /bin/bash
+  changed_when: true
+
+- name: "APP | wait for rollouts (best effort)"
+  tags: [app_apply]
+  ansible.builtin.shell: |
+    set -euo pipefail
+    export KUBECONFIG="${KUBECONFIG:-$HOME/.kube/config}"
+
+    for d in movie-manager-frontend movie-manager-backend mongo; do
+      if kubectl -n "{{ namespace_default }}" get deploy "$d" >/dev/null 2>&1; then
+        kubectl -n "{{ namespace_default }}" rollout status deploy/"$d" --timeout=10m
+      fi
+    done
+  args:
+    executable: /bin/bash
+  changed_when: false

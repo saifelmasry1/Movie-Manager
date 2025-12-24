@@ -1,0 +1,24 @@
+- name: App ingresses (default)
+  ansible.builtin.command: "kubectl -n {{ namespace_default }} get ingress -o wide"
+  register: app_ing
+  changed_when: false
+
+- ansible.builtin.debug:
+    var: app_ing.stdout
+
+- name: Grafana ingress (monitoring)
+  ansible.builtin.command: "kubectl -n {{ namespace_monitoring }} get ingress -o wide"
+  register: mon_ing
+  failed_when: false
+  changed_when: false
+
+- ansible.builtin.debug:
+    var: mon_ing.stdout
+
+- name: Grafana admin password
+  ansible.builtin.shell: |
+    set -e
+    kubectl -n "{{ namespace_monitoring }}" get secret "{{ grafana_secret_name }}" -o jsonpath="{.data.admin-password}" | base64 -d ; echo
+  args:
+    executable: /bin/bash
+  changed_when: false

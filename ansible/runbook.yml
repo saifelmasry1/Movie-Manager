@@ -1,0 +1,436 @@
+---
+- name: Movie-Manager EKS Runbook (Hardcoded)
+  hosts: jenkins
+  gather_facts: false
+  become: false
+
+  vars_files:
+    - group_vars/all.yml
+
+  vars:
+    repo_root: "{{ playbook_dir }}/.."
+    kubeconfig_path: "{{ lookup('env', 'KUBECONFIG') | default(lookup('env','HOME') ~ '/.kube/config', true) }}"
+
+    # Make manifests paths absolute to avoid cwd issues
+    seed_configmap_path: "{{ repo_root }}/{{ seed_configmap_manifest | default('k8s/mongo-seed-configmap.yaml') }}"
+    seed_job_path: "{{ repo_root }}/{{ seed_job_manifest | default('k8s/mongo-seed-job.yaml') }}"
+
+  environment:
+    AWS_REGION: "{{ aws_region }}"
+    KUBECONFIG: "{{ kubeconfig_path }}"
+
+  tasks:
+    # ---------------------------
+    # ALWAYS / Sanity
+    # ---------------------------
+    - name: ALWAYS | Sanity check - repo paths exist
+      tags: [always]
+      ansible.builtin.stat:
+        path: "{{ repo_root }}/{{ item }}"
+      loop:
+        - "{{ eks_dir }}"
+        - "{{ monitoring_dir }}"
+        - "{{ addons_dir }}"
+        - "k8s"
+      register: repo_paths
+      changed_when: false
+
+    - name: ALWAYS | Fail fast if repo layout is wrong
+      tags: [always]
+      ansible.builtin.assert:
+        that:
+          - repo_paths.results | map(attribute="stat.exists") | list | min
+        fail_msg: "Repo layout mismatch. Expected infra/* + k8s under repo root: {{ repo_root }}"
+        success_msg: "All assertions passed"
+      changed_when: false
+
+    # ---------------------------
+    # PRE-FLIGHT
+    # ---------------------------
+    - name: PRE-FLIGHT | Print hardcoded config + tool versions
+      tags: [preflight]
+      ansible.builtin.shell: |
+        set -euo pipefail
+
+        echo "REPO_ROOT     = {{ repo_root }}"
+        echo "AWS_REGION    = {{ aws_region }}"
+        echo "CLUSTER_NAME  = {{ cluster_name }}"
+        echo "KUBECONFIG    = {{ kubeconfig_path }}"
+        echo "PWD           = $(pwd)"
+        echo "-----"
+
+        command -v aws >/dev/null 2>&1 && aws --version || true
+        command -v kubectl >/dev/null 2>&1 && kubectl version --client=true -o yaml | sed -n '1,25p' || true
+        command -v helm >/dev/null 2>&1 && helm version || true
+        command -v terraform >/dev/null 2>&1 && terraform version | sed -n '1,3p' || true
+
+        echo "-----"
+        aws sts get-caller-identity
+      args:
+        executable: /bin/bash
+      changed_when: false
+
+    # ---------------------------
+    # KUBECONFIG
+    # ---------------------------
+    - name: KUBECONFIG | Update kubeconfig (hardcoded)
+      tags: [kubeconfig]
+      ansible.builtin.shell: |
+        set -e
+        aws eks update-kubeconfig --region "{{ aws_region }}" --name "{{ cluster_name }}"
+      args:
+        executable: /bin/bash
+      register: kubeconfig_out
+      changed_when: "'Added new context' in (kubeconfig_out.stdout | default(''))"
+
+    - name: KUBECONFIG | Verify cluster access
+      tags: [kubeconfig]
+      ansible.builtin.shell: |
+        set -e
+        kubectl config current-context
+        kubectl get nodes -o wide
+      args:
+        executable: /bin/bash
+      changed_when: false
+
+    # ---------------------------
+    # LBC (AWS Load Balancer Controller)
+    # ---------------------------
+    - name: LBC | Check if controller already installed & ready
+      tags: [lbc]
+      ansible.builtin.shell: |
+        set -e
+        kubectl -n kube-system get deploy aws-load-balancer-controller >/dev/null 2>&1
+        kubectl -n kube-system rollout status deploy/aws-load-balancer-controller --timeout=30s >/dev/null
+        kubectl get ingressclass alb >/dev/null 2>&1
+      args:
+        executable: /bin/bash
+      register: lbc_ready
+      failed_when: false
+      changed_when: false
+
+    - name: LBC | Compute VPC ID from EKS (only if needed)
+      tags: [lbc]
+      when: lbc_ready.rc != 0
+      ansible.builtin.shell: |
+        set -e
+        aws eks describe-cluster --name "{{ cluster_name }}" --region "{{ aws_region }}" \
+          --query 'cluster.resourcesVpcConfig.vpcId' --output text
+      args:
+        executable: /bin/bash
+      register: vpc_id_out
+      changed_when: false
+
+    - name: LBC | Install/Upgrade AWS Load Balancer Controller (only if missing)
+      tags: [lbc]
+      when: lbc_ready.rc != 0
+      ansible.builtin.shell: |
+        set -euo pipefail
+
+        VPC_ID="{{ vpc_id_out.stdout | trim }}"
+        if [ -z "$VPC_ID" ]; then
+          echo "ERROR: VPC_ID is empty. Check AWS creds/region/cluster."
+          exit 1
+        fi
+
+        cd "{{ repo_root }}/{{ addons_dir }}"
+        chmod +x aws-lbc-cli.sh
+
+        SAMPLE_FLAG="{{ '--with-sample' if lbc_deploy_sample else '--no-sample' }}"
+        ./aws-lbc-cli.sh --cluster "{{ cluster_name }}" --region "{{ aws_region }}" --vpc-id "$VPC_ID" $SAMPLE_FLAG
+
+        kubectl -n kube-system rollout status deploy/aws-load-balancer-controller --timeout=10m
+        kubectl get ingressclass alb
+      args:
+        executable: /bin/bash
+      changed_when: true
+
+    # ---------------------------
+    # TERRAFORM MONITORING (idempotent-ish)
+    # ---------------------------
+    - name: TERRAFORM MONITORING | fmt check (no change if already formatted)
+      tags: [terraform_monitoring]
+      ansible.builtin.shell: |
+        set -e
+        cd "{{ repo_root }}/{{ monitoring_dir }}"
+        terraform fmt -recursive -check
+      args:
+        executable: /bin/bash
+      register: tf_fmt_check
+      failed_when: false
+      changed_when: false
+
+    - name: TERRAFORM MONITORING | fmt apply (only if needed)
+      tags: [terraform_monitoring]
+      when: tf_fmt_check.rc != 0
+      ansible.builtin.shell: |
+        set -e
+        cd "{{ repo_root }}/{{ monitoring_dir }}"
+        terraform fmt -recursive
+      args:
+        executable: /bin/bash
+      changed_when: true
+
+    - name: TERRAFORM MONITORING | init (safe)
+      tags: [terraform_monitoring]
+      ansible.builtin.shell: |
+        set -e
+        cd "{{ repo_root }}/{{ monitoring_dir }}"
+        terraform init -upgrade
+      args:
+        executable: /bin/bash
+      changed_when: false
+
+    - name: TERRAFORM MONITORING | plan (detailed exit code)
+      tags: [terraform_monitoring]
+      ansible.builtin.shell: |
+        set -e
+        cd "{{ repo_root }}/{{ monitoring_dir }}"
+        terraform plan -detailed-exitcode -no-color
+      args:
+        executable: /bin/bash
+      register: tf_plan
+      failed_when: tf_plan.rc not in [0, 2]
+      changed_when: tf_plan.rc == 2
+
+    - name: TERRAFORM MONITORING | apply (only if plan has changes)
+      tags: [terraform_monitoring]
+      when: tf_plan.rc == 2
+      ansible.builtin.shell: |
+        set -e
+        cd "{{ repo_root }}/{{ monitoring_dir }}"
+        terraform apply -auto-approve -no-color
+      args:
+        executable: /bin/bash
+      changed_when: true
+
+    # ---------------------------
+    # FIX Ingress Conflict (Grafana)
+    # ---------------------------
+    - name: FIX Ingress Conflict | detect grafana ingress exists
+      tags: [fix_ingress]
+      ansible.builtin.shell: |
+        set +e
+        kubectl -n "{{ namespace_monitoring }}" get ingress "{{ grafana_ingress_name }}" >/dev/null 2>&1
+        echo $?
+      args:
+        executable: /bin/bash
+      register: grafana_ing_exists_rc
+      changed_when: false
+
+    - name: FIX Ingress Conflict | terraform init (monitoring)
+      tags: [fix_ingress]
+      when: grafana_ing_exists_rc.stdout | int == 0
+      ansible.builtin.shell: |
+        set -e
+        cd "{{ repo_root }}/{{ monitoring_dir }}"
+        terraform init -upgrade
+      args:
+        executable: /bin/bash
+      changed_when: false
+
+    - name: FIX Ingress Conflict | check if grafana ingress is already in terraform state
+      tags: [fix_ingress]
+      when: grafana_ing_exists_rc.stdout | int == 0
+      ansible.builtin.shell: |
+        set +e
+        cd "{{ repo_root }}/{{ monitoring_dir }}"
+        terraform state show kubernetes_ingress_v1.grafana_alb >/dev/null 2>&1
+        echo $?
+      args:
+        executable: /bin/bash
+      register: grafana_tfstate_rc
+      changed_when: false
+
+    - name: FIX Ingress Conflict | ADOPT (terraform import) if needed
+      tags: [fix_ingress]
+      when:
+        - grafana_ing_exists_rc.stdout | int == 0
+        - ingress_conflict_strategy == "adopt"
+        - grafana_tfstate_rc.stdout | int != 0
+      ansible.builtin.shell: |
+        set -e
+        cd "{{ repo_root }}/{{ monitoring_dir }}"
+        terraform import kubernetes_ingress_v1.grafana_alb "{{ namespace_monitoring }}/{{ grafana_ingress_name }}"
+      args:
+        executable: /bin/bash
+      register: tf_import_out
+      failed_when: false
+      changed_when: tf_import_out.rc == 0
+
+    - name: FIX Ingress Conflict | RECREATE (delete ingress then reconcile)
+      tags: [fix_ingress]
+      when:
+        - grafana_ing_exists_rc.stdout | int == 0
+        - ingress_conflict_strategy == "recreate"
+      ansible.builtin.shell: |
+        set -e
+        kubectl -n "{{ namespace_monitoring }}" delete ingress "{{ grafana_ingress_name }}" --ignore-not-found=true
+      args:
+        executable: /bin/bash
+      register: graf_del
+      changed_when: "'deleted' in (graf_del.stdout | lower)"
+
+    - name: FIX Ingress Conflict | plan/apply monitoring only if needed
+      tags: [fix_ingress]
+      when: grafana_ing_exists_rc.stdout | int == 0
+      block:
+        - name: FIX Ingress Conflict | plan
+          ansible.builtin.shell: |
+            set -e
+            cd "{{ repo_root }}/{{ monitoring_dir }}"
+            terraform plan -detailed-exitcode -no-color
+          args:
+            executable: /bin/bash
+          register: tf_plan2
+          failed_when: tf_plan2.rc not in [0, 2]
+          changed_when: tf_plan2.rc == 2
+
+        - name: FIX Ingress Conflict | apply (only if plan has changes)
+          when: tf_plan2.rc == 2
+          ansible.builtin.shell: |
+            set -e
+            cd "{{ repo_root }}/{{ monitoring_dir }}"
+            terraform apply -auto-approve -no-color
+          args:
+            executable: /bin/bash
+          changed_when: true
+
+    # ---------------------------
+    # FIX ImagePullBackOff
+    # ---------------------------
+    - name: FIX ImagePullBackOff | list problematic pods (default ns)
+      tags: [fix_imagepull]
+      ansible.builtin.shell: |
+        set +e
+        kubectl -n "{{ namespace_default }}" get pods | egrep -i 'ImagePullBackOff|ErrImagePull' || true
+      args:
+        executable: /bin/bash
+      register: badpods_list
+      changed_when: false
+
+    - name: FIX ImagePullBackOff | describe bad pods (if any)
+      tags: [fix_imagepull]
+      when: badpods_list.stdout | length > 0
+      ansible.builtin.shell: |
+        set -e
+        echo "{{ badpods_list.stdout }}" | awk '{print $1}' | while read -r p; do
+          echo "---- DESCRIBE: $p ----"
+          kubectl -n "{{ namespace_default }}" describe pod "$p" | sed -n '1,140p'
+          echo
+        done
+      args:
+        executable: /bin/bash
+      changed_when: false
+
+    - name: FIX ImagePullBackOff | optional fallback to :latest (only if enabled)
+      tags: [fix_imagepull]
+      when: (badpods_list.stdout | length > 0) and (imagepull_strategy == "fallback_latest")
+      ansible.builtin.shell: |
+        set -e
+        echo "Fallback strategy enabled -> patching deployments to :latest"
+
+        kubectl -n "{{ namespace_default }}" set image deployment/movie-manager-frontend "*={{ aws_account_id }}.dkr.ecr.{{ aws_region }}.amazonaws.com/movie-manager-frontend:latest" || true
+        kubectl -n "{{ namespace_default }}" set image deployment/movie-manager-backend  "*={{ aws_account_id }}.dkr.ecr.{{ aws_region }}.amazonaws.com/movie-manager-backend:latest"  || true
+
+        kubectl -n "{{ namespace_default }}" rollout status deployment/movie-manager-frontend --timeout=10m
+        kubectl -n "{{ namespace_default }}" rollout status deployment/movie-manager-backend  --timeout=10m
+      args:
+        executable: /bin/bash
+      changed_when: true
+
+    # ---------------------------
+    # FIX Seed Job (single source of truth)
+    # ---------------------------
+    - name: "FIX Seed Job | reconcile job state (safe/ensure_present/force_rerun)"
+      tags: [fix_seed]
+      ansible.builtin.import_tasks: tasks/fix_seed_job.yml
+
+    # ---------------------------
+    # APP APPLY (restore application manifests / movie-manager ingress)
+    # ---------------------------
+    - name: "APP | Apply k8s manifests (app_ingress restore)"
+      ansible.builtin.import_tasks: tasks/app_apply.yml
+      tags: [app_apply]
+
+    # ---------------------------
+    # REPORT URLs (pretty)
+    # ---------------------------
+    - name: REPORT | Collect ingresses (default)
+      tags: [report_urls]
+      ansible.builtin.shell: |
+        set -e
+        kubectl -n "{{ namespace_default }}" get ingress -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.loadBalancer.ingress[0].hostname}{"\n"}{end}' || true
+      args:
+        executable: /bin/bash
+      register: default_ing_map
+      changed_when: false
+
+    - name: REPORT | Collect ingresses (monitoring)
+      tags: [report_urls]
+      ansible.builtin.shell: |
+        set -e
+        kubectl -n "{{ namespace_monitoring }}" get ingress -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.loadBalancer.ingress[0].hostname}{"\n"}{end}' || true
+      args:
+        executable: /bin/bash
+      register: mon_ing_map
+      changed_when: false
+
+    - name: REPORT | Read Grafana admin password
+      tags: [report_urls]
+      ansible.builtin.shell: |
+        set -e
+        kubectl -n "{{ namespace_monitoring }}" get secret "{{ grafana_secret_name }}" -o jsonpath="{.data.admin-password}" | base64 -d
+      args:
+        executable: /bin/bash
+      register: grafana_pass
+      failed_when: false
+      changed_when: false
+
+    - name: REPORT | Pretty summary (ALBs + Grafana)
+      tags: [report_urls]
+      ansible.builtin.set_fact:
+        grafana_host: >-
+          {{
+            (
+              (mon_ing_map.stdout_lines | default([]))
+              | select('match', '^' ~ grafana_ingress_name ~ '\t')
+              | list
+              | first
+              | default('')
+            )
+            | regex_replace('^' ~ grafana_ingress_name ~ '\t', '')
+            | trim
+          }}
+      changed_when: false
+
+    - name: REPORT | Print summary
+      tags: [report_urls]
+      ansible.builtin.debug:
+        msg: |
+          ==============================
+          ✅ Ingresses (default)
+          {% if (default_ing_map.stdout | trim) %}
+          {{ default_ing_map.stdout | trim }}
+          {% else %}
+          (no ingresses found)
+          {% endif %}
+
+          ✅ Ingresses (monitoring)
+          {% if (mon_ing_map.stdout | trim) %}
+          {{ mon_ing_map.stdout | trim }}
+          {% else %}
+          (no ingresses found)
+          {% endif %}
+
+          ✅ Grafana
+          {% if (grafana_host | trim) %}
+          URL      : http://{{ grafana_host | trim }}
+          Username : admin
+          Password : {{ (grafana_pass.stdout | default('')) | trim }}
+          {% else %}
+          Grafana ingress '{{ grafana_ingress_name }}' not found (or no hostname yet).
+          Password (if available): {{ (grafana_pass.stdout | default('')) | trim }}
+          {% endif %}
+          ==============================
+      changed_when: false

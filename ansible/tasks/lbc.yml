@@ -1,0 +1,39 @@
+- name: Get VPC ID from EKS cluster
+  ansible.builtin.command: >
+    aws eks describe-cluster
+    --name {{ cluster_name }}
+    --region {{ aws_region }}
+    --query cluster.resourcesVpcConfig.vpcId
+    --output text
+  register: vpc
+  changed_when: false
+
+- name: Print VPC ID
+  ansible.builtin.debug:
+    msg: "VPC_ID={{ vpc.stdout }}"
+
+- name: Ensure LBC script is executable
+  ansible.builtin.command: "chmod +x {{ addons_dir_abs }}/aws-lbc-cli.sh"
+  changed_when: false
+
+- name: Run LBC installer (pass explicit VPC)
+  ansible.builtin.command: >
+    {{ addons_dir_abs }}/aws-lbc-cli.sh
+    --cluster {{ cluster_name }}
+    --region {{ aws_region }}
+    --vpc-id {{ vpc.stdout }}
+    {{ '--with-sample' if lbc_deploy_sample else '--no-sample' }}
+  register: lbc
+  changed_when: true
+
+- name: Print LBC output (tail)
+  ansible.builtin.debug:
+    msg: "{{ (lbc.stdout_lines | default([]))[-25:] | join('\n') }}"
+
+- name: Verify controller rollout
+  ansible.builtin.command: "kubectl -n kube-system rollout status deploy/aws-load-balancer-controller --timeout=10m"
+  changed_when: false
+
+- name: Verify ingressclass
+  ansible.builtin.command: "kubectl get ingressclass"
+  changed_when: false

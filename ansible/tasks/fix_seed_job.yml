@@ -1,0 +1,117 @@
+---
+- name: "FIX Seed Job | detect status (exists/failed/succeeded)"
+  ansible.builtin.shell: |
+    set +e
+    export KUBECONFIG="${KUBECONFIG:-$HOME/.kube/config}"
+
+    NS="{{ namespace_default }}"
+    JOB="{{ seed_job_name | default('mongo-seed-movies') }}"
+
+    kubectl -n "$NS" get job "$JOB" >/dev/null 2>&1
+    echo "JOB_EXISTS_RC=$?"
+
+    FAILS=$(kubectl -n "$NS" get job "$JOB" -o jsonpath='{.status.failed}' 2>/dev/null)
+    SUCC=$(kubectl -n "$NS" get job "$JOB" -o jsonpath='{.status.succeeded}' 2>/dev/null)
+
+    echo "FAILED=${FAILS:-0}"
+    echo "SUCCEEDED=${SUCC:-0}"
+  args:
+    executable: /bin/bash
+  register: seed_status
+  changed_when: false
+
+- name: "FIX Seed Job | parse status"
+  ansible.builtin.set_fact:
+    seed_job_exists: "{{ (seed_status.stdout is search('JOB_EXISTS_RC=0')) }}"
+    seed_failed: "{{ (seed_status.stdout | regex_search('FAILED=([0-9]+)', '\\1') | default('0')) | int }}"
+    seed_succeeded: "{{ (seed_status.stdout | regex_search('SUCCEEDED=([0-9]+)', '\\1') | default('0')) | int }}"
+    effective_seed_policy: "{{ seed_policy | default('safe') }}"
+  changed_when: false
+
+- name: "FIX Seed Job | (safe) missing job -> skip with hint"
+  when:
+    - not seed_job_exists
+    - effective_seed_policy == "safe"
+  ansible.builtin.debug:
+    msg: |
+      Seed job is missing and seed_policy=safe.
+      Nothing will be created (safe behavior).
+      To recreate for demo, run:
+        ansible-playbook -i ansible/inventory.ini ansible/runbook.yml --tags fix_seed -e seed_policy=ensure_present
+  changed_when: false
+
+- name: "FIX Seed Job | missing job -> create (ensure_present)"
+  when:
+    - not seed_job_exists
+    - effective_seed_policy == "ensure_present"
+  ansible.builtin.shell: |
+    set -euo pipefail
+    export KUBECONFIG="${KUBECONFIG:-$HOME/.kube/config}"
+
+    NS="{{ namespace_default }}"
+    JOB="{{ seed_job_name | default('mongo-seed-movies') }}"
+
+    echo "Seed job is missing -> creating it now (ensure_present)."
+    kubectl -n "$NS" apply -f "{{ seed_configmap_path }}"
+    kubectl -n "$NS" apply -f "{{ seed_job_path }}"
+    kubectl -n "$NS" wait --for=condition=complete job/"$JOB" --timeout=10m
+    echo "Seed job created and completed."
+  args:
+    executable: /bin/bash
+  changed_when: true
+
+- name: "FIX Seed Job | job exists but failed -> logs + rerun once"
+  when:
+    - seed_job_exists
+    - seed_failed > 0
+    - effective_seed_policy != "force_rerun"
+  ansible.builtin.shell: |
+    set -euo pipefail
+    export KUBECONFIG="${KUBECONFIG:-$HOME/.kube/config}"
+
+    NS="{{ namespace_default }}"
+    JOB="{{ seed_job_name | default('mongo-seed-movies') }}"
+
+    echo "Seed job has failures={{ seed_failed }} -> printing logs then rerun once..."
+    POD=$(kubectl -n "$NS" get pods -l job-name="$JOB" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+    if [ -n "${POD:-}" ]; then
+      kubectl -n "$NS" logs "$POD" || true
+    fi
+
+    kubectl -n "$NS" delete job "$JOB" --ignore-not-found=true
+    kubectl -n "$NS" apply -f "{{ seed_configmap_path }}"
+    kubectl -n "$NS" apply -f "{{ seed_job_path }}"
+    kubectl -n "$NS" wait --for=condition=complete job/"$JOB" --timeout=10m
+    echo "Seed rerun done."
+  args:
+    executable: /bin/bash
+  changed_when: true
+
+- name: "FIX Seed Job | force rerun (demo-only)"
+  when:
+    - effective_seed_policy == "force_rerun"
+  ansible.builtin.shell: |
+    set -euo pipefail
+    export KUBECONFIG="${KUBECONFIG:-$HOME/.kube/config}"
+
+    NS="{{ namespace_default }}"
+    JOB="{{ seed_job_name | default('mongo-seed-movies') }}"
+
+    echo "FORCE RERUN enabled -> deleting and recreating seed job (demo-only)."
+    kubectl -n "$NS" delete job "$JOB" --ignore-not-found=true
+    kubectl -n "$NS" apply -f "{{ seed_configmap_path }}"
+    kubectl -n "$NS" apply -f "{{ seed_job_path }}"
+    kubectl -n "$NS" wait --for=condition=complete job/"$JOB" --timeout=10m
+    echo "Seed force rerun done."
+  args:
+    executable: /bin/bash
+  changed_when: true
+
+- name: "FIX Seed Job | nothing to do"
+  when:
+    - effective_seed_policy != "force_rerun"
+    - seed_job_exists
+    - seed_failed == 0
+  ansible.builtin.debug:
+    msg: "Seed job is healthy (exists={{ seed_job_exists }}, failed={{ seed_failed }}, succeeded={{ seed_succeeded }}). Nothing to do."
+  changed_when: false

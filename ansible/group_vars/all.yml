@@ -1,0 +1,34 @@
+aws_region: "us-east-1"
+cluster_name: "depi-eks"
+aws_account_id: "163511166008"
+
+# Paths (RELATIVE) — هنثبّت الـchdir في runbook على repo root
+eks_dir: "infra/eks"
+monitoring_dir: "infra/monitoring"
+addons_dir: "infra/addons"
+k8s_dir: "k8s"
+
+namespace_default: "default"
+namespace_monitoring: "monitoring"
+
+grafana_ingress_name: "grafana-alb"
+grafana_secret_name: "kube-prometheus-stack-grafana"
+
+# Terraform address داخل state (غيّره لو اسم الـresource مختلف عندك)
+tf_grafana_ingress_address: "kubernetes_ingress_v1.grafana_alb"
+
+# Strategies
+ingress_conflict_strategy: "adopt"     # adopt | recreate
+imagepull_strategy: "diagnose_only"    # diagnose_only | fallback_latest
+lbc_deploy_sample: false
+
+
+
+# Seed policy:
+# safe            -> do nothing if job is missing; only rerun if job exists and failed
+# ensure_present  -> if job is missing, create it and wait for completion
+# force_rerun     -> always delete+recreate the job (demo-only)
+seed_policy: "safe"
+seed_job_name: "mongo-seed-movies"
+seed_configmap_manifest: "k8s/mongo-seed-configmap.yaml"
+seed_job_manifest: "k8s/mongo-seed-job.yaml"

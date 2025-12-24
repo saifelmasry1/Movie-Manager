@@ -1,0 +1,37 @@
+- name: List ImagePullBackOff / ErrImagePull pods (default ns)
+  ansible.builtin.shell: |
+    set +e
+    kubectl -n "{{ namespace_default }}" get pods | egrep -i 'ImagePullBackOff|ErrImagePull' || true
+  args:
+    executable: /bin/bash
+  register: badpods_list
+  changed_when: false
+
+- name: Describe bad pods (if any)
+  ansible.builtin.shell: |
+    set -e
+    echo "{{ badpods_list.stdout }}" | awk '{print $1}' | while read -r p; do
+      echo "---- DESCRIBE: $p ----"
+      kubectl -n "{{ namespace_default }}" describe pod "$p" | sed -n '1,140p'
+      echo
+    done
+  args:
+    executable: /bin/bash
+  when: badpods_list.stdout | length > 0
+  changed_when: false
+
+- name: Optional fallback to :latest (only if enabled)
+  ansible.builtin.shell: |
+    set -e
+    echo "Fallback strategy enabled -> patching deployments to :latest"
+    kubectl -n "{{ namespace_default }}" set image deployment/movie-manager-frontend "*={{ aws_account_id }}.dkr.ecr.{{ aws_region }}.amazonaws.com/movie-manager-frontend:latest" || true
+    kubectl -n "{{ namespace_default }}" set image deployment/movie-manager-backend  "*={{ aws_account_id }}.dkr.ecr.{{ aws_region }}.amazonaws.com/movie-manager-backend:latest"  || true
+
+    kubectl -n "{{ namespace_default }}" rollout status deployment/movie-manager-frontend --timeout=10m
+    kubectl -n "{{ namespace_default }}" rollout status deployment/movie-manager-backend  --timeout=10m
+  args:
+    executable: /bin/bash
+  when:
+    - badpods_list.stdout | length > 0
+    - imagepull_strategy == "fallback_latest"
+  changed_when: true

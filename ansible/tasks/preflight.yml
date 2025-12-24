@@ -1,0 +1,41 @@
+- name: Print effective config
+  ansible.builtin.debug:
+    msg:
+      - "aws_region={{ aws_region }}, cluster={{ cluster_name }}, account={{ aws_account_id }}"
+      - "KUBECONFIG={{ kubeconfig_path }}"
+      - "repo_root={{ repo_root }}"
+      - "addons_dir_abs={{ addons_dir_abs }}"
+      - "monitoring_dir_abs={{ monitoring_dir_abs }}"
+      - "k8s_dir_abs={{ k8s_dir_abs }}"
+      - "ingress_conflict_strategy={{ ingress_conflict_strategy }}, imagepull_strategy={{ imagepull_strategy }}, seed_retry_once={{ seed_retry_once }}"
+
+- name: Check required CLI tools exist
+  vars:
+    tools: ["aws", "kubectl", "terraform", "helm", "eksctl"]
+  ansible.builtin.command: "bash -lc 'command -v {{ item }}'"
+  loop: "{{ tools }}"
+  changed_when: false
+
+- name: Show tool versions
+  ansible.builtin.command: "bash -lc '{{ item }} version 2>/dev/null || {{ item }} --version 2>/dev/null || true'"
+  loop:
+    - aws
+    - kubectl
+    - terraform
+    - helm
+    - eksctl
+  register: versions
+  changed_when: false
+
+- name: Print versions
+  ansible.builtin.debug:
+    var: versions.results | map(attribute='stdout') | list
+
+- name: Verify AWS identity
+  ansible.builtin.command: "aws sts get-caller-identity --output json"
+  register: sts
+  changed_when: false
+
+- name: Print AWS identity
+  ansible.builtin.debug:
+    var: sts.stdout
