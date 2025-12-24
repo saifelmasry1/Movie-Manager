@@ -31,7 +31,7 @@ const MoviesPage = () => {
         <div className="movies-page">
             <header className="app-header">
                 <h1>Movie Manager 🎬</h1>
-                <p>Top 12 Must-Watch Movies</p>
+                <p>Top 9 Must-Watch Movies</p>
             </header>
             <main>
                 <MovieList movies={movies} />
